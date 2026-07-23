@@ -537,27 +537,32 @@ function formatLayoverLine(previousSegment, nextSegment) {
 function renderFlightDetailLines(matchDate, detail, hit) {
   const departs = formatTimeFromIso(detail.departsAt);
   const arrives = formatTimeFromIso(detail.arrivesAt);
-  const origin = detail.originCode || "?";
-  const destination = detail.destinationCode || "?";
+  const originCode = detail.originCode || "";
+  const destinationCode = detail.destinationCode || "";
+  const originLabel = originCode || detail.originName || "?";
+  const destinationLabel = destinationCode || detail.destinationName || "?";
   const durationText =
     formatDurationValue(detail.duration) || formatDurationValue(getDurationMinutes(detail.departsAt, detail.arrivesAt));
 
+  const priceText = `${formatPoints(detail.points)} + ${formatCash(detail.currency, detail.tax)}`;
   const summaryParts = [
-    `[${matchDate}]`,
-    `[${departs} ${origin} → ${arrives} ${destination}]`,
-    hit.cabin,
+    `📅 ${matchDate}`,
+    `✈️ ${departs} ${originLabel} → ${arrives} ${destinationLabel}`,
+    `💺 ${hit.cabin}`,
   ];
   if (durationText) {
-    summaryParts.push(durationText);
+    summaryParts.push(`⏱ ${durationText}`);
   }
-  summaryParts.push(`${formatPoints(detail.points)} + ${formatCash(detail.currency, detail.tax)}`);
-  summaryParts.push(`${detail.seats} spots left`);
+  summaryParts.push(`💰 ${priceText}`);
+  summaryParts.push(`🪑 ${detail.seats} spots left`);
 
   const lines = [`• ${summaryParts.join(" | ")}`];
+  lines.push(`  📍 ${originLabel} → ${destinationLabel}`);
+  lines.push(`  💵 ${priceText}`);
 
   if (detail.originName || detail.destinationName) {
-    const originText = detail.originName ? `${detail.originCode} (${detail.originName})` : detail.originCode;
-    const destinationText = detail.destinationName ? `${detail.destinationCode} (${detail.destinationName})` : detail.destinationCode;
+    const originText = detail.originName ? `${originLabel} (${detail.originName})` : originLabel;
+    const destinationText = detail.destinationName ? `${destinationLabel} (${detail.destinationName})` : destinationLabel;
     lines.push(`  ${originText} → ${destinationText}`);
   }
 

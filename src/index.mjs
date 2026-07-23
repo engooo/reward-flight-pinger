@@ -151,6 +151,7 @@ function sanitizeConfig(rawConfig) {
   cfg.alertSinks.telegram = cfg.alertSinks.telegram === true;
   cfg.alertSinks.email = cfg.alertSinks.email === true;
   cfg.alertSinks.emailTo = cfg.alertSinks.emailTo || "";
+  cfg.testPing = cfg.testPing === true;
 
   cfg.watchGroups = Array.isArray(cfg.watchGroups)
     ? cfg.watchGroups.map(normalizeWatchGroup)
@@ -418,6 +419,171 @@ function formatCash(currency, tax) {
   return `${currencyLabel}0`;
 }
 
+function parseIsoDuration(isoDuration) {
+  if (typeof isoDuration === "number" && Number.isFinite(isoDuration)) {
+    return Math.round(isoDuration);
+  }
+  if (!isoDuration || typeof isoDuration !== "string") {
+    return null;
+  }
+
+  const trimmed = isoDuration.trim();
+  const isoMatch = /^P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?$/i.exec(trimmed);
+  if (isoMatch) {
+    const days = Number(isoMatch[1] || 0);
+    const hours = Number(isoMatch[2] || 0);
+    const minutes = Number(isoMatch[3] || 0);
+    return days * 24 * 60 + hours * 60 + minutes;
+  }
+
+  const clockMatch = /^(\d+):(\d{2})$/.exec(trimmed);
+  if (clockMatch) {
+    return Number(clockMatch[1]) * 60 + Number(clockMatch[2]);
+  }
+
+  const numeric = Number(trimmed);
+  if (Number.isFinite(numeric)) {
+    return Math.round(numeric);
+  }
+
+  return null;
+}
+
+function formatMinutesAsHoursMinutes(minutes) {
+  if (!Number.isFinite(minutes) || minutes <= 0) {
+    return null;
+  }
+  const hours = Math.floor(minutes / 60);
+  const mins = Math.round(minutes % 60);
+  if (hours > 0) {
+    return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+  }
+  return `${mins}m`;
+}
+
+function formatDurationValue(value) {
+  const minutes = parseIsoDuration(value);
+  if (minutes !== null) {
+    return formatMinutesAsHoursMinutes(minutes);
+  }
+  if (typeof value === "string" && value.trim()) {
+    return value.trim();
+  }
+  return null;
+}
+
+function getDurationMinutes(departsAt, arrivesAt) {
+  if (!departsAt || !arrivesAt) {
+    return null;
+  }
+  const start = new Date(departsAt);
+  const end = new Date(arrivesAt);
+  if (Number.isNaN(start.valueOf()) || Number.isNaN(end.valueOf())) {
+    return null;
+  }
+  const diff = Math.round((end.valueOf() - start.valueOf()) / 60000);
+  return diff >= 0 ? diff : null;
+}
+
+function normalizeFlightLeg(leg) {
+  if (!leg || typeof leg !== "object") {
+    return null;
+  }
+  return {
+    departsAt: String(leg.departsAt || leg.departureAt || leg.startAt || ""),
+    arrivesAt: String(leg.arrivesAt || leg.arrivalAt || leg.endAt || ""),
+    originCode: String(leg.origin?.code || leg.originCode || "").trim(),
+    originName: String(leg.origin?.name || leg.originName || "").trim(),
+    destinationCode: String(leg.destination?.code || leg.destinationCode || "").trim(),
+    destinationName: String(leg.destination?.name || leg.destinationName || "").trim(),
+    duration: String(leg.duration || leg.durationMinutes || leg.travelTime || "").trim(),
+    layoverDuration: String(leg.connectionDuration || leg.layoverDuration || leg.stopoverDuration || "").trim(),
+  };
+}
+
+function buildFlightLegs(flight) {
+  const rawLegs = Array.isArray(flight?.legs)
+    ? flight.legs
+    : Array.isArray(flight?.segments)
+      ? flight.segments
+      : [];
+
+  return rawLegs
+    .map(normalizeFlightLeg)
+    .filter((leg) => leg && (leg.departsAt || leg.arrivesAt || leg.originCode || leg.destinationCode));
+}
+
+function formatFlightSegmentLine(segment, isLast) {
+  const departureTime = formatTimeFromIso(segment.departsAt);
+  const arrivalTime = formatTimeFromIso(segment.arrivesAt);
+  const origin = segment.originCode || "?";
+  const destination = segment.destinationCode || "?";
+  const durationText = formatDurationValue(segment.duration) || formatDurationValue(getDurationMinutes(segment.departsAt, segment.arrivesAt));
+  const durationPart = durationText ? ` | ${durationText}` : "";
+  const branch = isLast ? "└" : "├";
+  return `  ${branch} ${departureTime} ${origin} → ${arrivalTime} ${destination}${durationPart}`;
+}
+
+function formatLayoverLine(previousSegment, nextSegment) {
+  const waitMinutes = getDurationMinutes(previousSegment.arrivesAt, nextSegment.departsAt);
+  const layoverText = formatDurationValue(previousSegment.layoverDuration) || formatMinutesAsHoursMinutes(waitMinutes);
+  if (!layoverText) {
+    return null;
+  }
+  const location = nextSegment.originCode || nextSegment.originName || "connection";
+  return `    ⏳ ${layoverText} layover at ${location}`;
+}
+
+function renderFlightDetailLines(matchDate, detail, hit) {
+  const departs = formatTimeFromIso(detail.departsAt);
+  const arrives = formatTimeFromIso(detail.arrivesAt);
+  const origin = detail.originCode || "?";
+  const destination = detail.destinationCode || "?";
+  const durationText =
+    formatDurationValue(detail.duration) || formatDurationValue(getDurationMinutes(detail.departsAt, detail.arrivesAt));
+
+  const summaryParts = [
+    `[${matchDate}]`,
+    `[${departs} ${origin} → ${arrives} ${destination}]`,
+    hit.cabin,
+  ];
+  if (durationText) {
+    summaryParts.push(durationText);
+  }
+  summaryParts.push(`${formatPoints(detail.points)} + ${formatCash(detail.currency, detail.tax)}`);
+  summaryParts.push(`${detail.seats} spots left`);
+
+  const lines = [`• ${summaryParts.join(" | ")}`];
+
+  if (detail.originName || detail.destinationName) {
+    const originText = detail.originName ? `${detail.originCode} (${detail.originName})` : detail.originCode;
+    const destinationText = detail.destinationName ? `${detail.destinationCode} (${detail.destinationName})` : detail.destinationCode;
+    lines.push(`  ${originText} → ${destinationText}`);
+  }
+
+  if (Array.isArray(detail.legs) && detail.legs.length > 0) {
+    for (let index = 0; index < detail.legs.length; index += 1) {
+      const segment = detail.legs[index];
+      lines.push(formatFlightSegmentLine(segment, index === detail.legs.length - 1));
+      if (index < detail.legs.length - 1) {
+        const layoverLine = formatLayoverLine(segment, detail.legs[index + 1]);
+        if (layoverLine) {
+          lines.push(layoverLine);
+        }
+      }
+    }
+  }
+
+  return lines;
+}
+
+function parseBooleanEnv(value) {
+  if (!value) {
+    return false;
+  }
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
 function formatTimeFromIso(iso) {
   if (!iso || typeof iso !== "string" || iso.length < 16) {
     return "--:--";
@@ -530,6 +696,8 @@ function buildFlightDetailIndex(flights) {
         originName: flight?.origin?.name || "",
         destinationCode,
         destinationName: flight?.destination?.name || "",
+        duration: flight.duration || flight.totalDuration || "",
+        legs: buildFlightLegs(flight),
       };
 
       const append = (keyToUse) => {
@@ -564,9 +732,31 @@ function buildFlightDetailIndex(flights) {
   return index;
 }
 
-function pickDetailForHit(matchDate, hit, detailIndex) {
+function getExactRouteDetail(matchDate, hit, group, detailIndex) {
+  const originCodes = Array.isArray(group.originAirports) && group.originAirports.length === 1
+    ? group.originAirports
+    : [];
+  const destinationCodes = Array.isArray(group.destinationAirports) && group.destinationAirports.length === 1
+    ? group.destinationAirports
+    : [];
+
+  if (originCodes.length === 1 && destinationCodes.length === 1) {
+    const routeKey = `${matchDate}|${hit.cabin}|${originCodes[0]}|${destinationCodes[0]}`;
+    const routeOptions = detailIndex.get(routeKey) || [];
+    if (routeOptions.length > 0) {
+      return routeOptions[0];
+    }
+  }
+  return null;
+}
+
+function pickDetailForHit(matchDate, hit, group, detailIndex) {
   const key = `${matchDate}|${hit.cabin}`;
   const options = detailIndex.get(key) || [];
+  const routeDetail = getExactRouteDetail(matchDate, hit, group, detailIndex);
+  if (routeDetail) {
+    return routeDetail;
+  }
   const minSeats = Number(hit.minSeats || 1);
   const filtered = options.filter((option) => option.seats >= minSeats);
   if (filtered.length > 0) {
@@ -587,18 +777,9 @@ function buildAlertTextForGroup(group, matches, cfg, detailIndex = null) {
   for (const match of matches) {
     for (const hit of match.hits) {
       if (detailIndex) {
-        const detail = pickDetailForHit(match.date, hit, detailIndex);
+        const detail = pickDetailForHit(match.date, hit, group, detailIndex);
         if (detail) {
-          const departs = formatTimeFromIso(detail.departsAt);
-          const origin = detail.originName
-            ? `${detail.originName} (${detail.originCode})`
-            : detail.originCode;
-          const destination = detail.destinationName
-            ? `${detail.destinationName} (${detail.destinationCode})`
-            : detail.destinationCode;
-          lines.push(
-            `• ${match.date} ${departs} | ${hit.cabin} | ${origin} → ${destination} | ${formatPoints(detail.points)} + ${formatCash(detail.currency, detail.tax)} | seats:${detail.seats}`
-          );
+          lines.push(...renderFlightDetailLines(match.date, detail, hit));
           continue;
         }
       }
@@ -623,19 +804,9 @@ function buildTelegramTextForGroup(group, matches, cfg, detailIndex = null) {
     lines.push(`📅 ${formatLongDate(match.date)}`);
 
     for (const hit of match.hits) {
-      const detail = detailIndex ? pickDetailForHit(match.date, hit, detailIndex) : null;
-
+      const detail = detailIndex ? pickDetailForHit(match.date, hit, group, detailIndex) : null;
       if (detail) {
-        const departs = formatTimeFromIso(detail.departsAt);
-        const origin = detail.originName
-          ? `${detail.originName} (${detail.originCode})`
-          : detail.originCode;
-        const destination = detail.destinationName
-          ? `${detail.destinationName} (${detail.destinationCode})`
-          : detail.destinationCode;
-        lines.push(
-          `• ${departs} | ${hit.cabin} | ${origin} → ${destination} | seats ${detail.seats} | ${formatPoints(detail.points)} + ${formatCash(detail.currency, detail.tax)}`
-        );
+        lines.push(...renderFlightDetailLines(detail, hit));
       } else {
         lines.push(`• ${hit.cabin} | seats ${hit.seats}`);
       }
@@ -728,13 +899,6 @@ async function sendTelegram(text) {
   if (!payload?.ok) {
     throw new Error(`Telegram send failed: ${payload?.description || "Unknown error"}`);
   }
-}
-
-function parseBooleanEnv(value) {
-  if (!value) {
-    return false;
-  }
-  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
 }
 
 function parseEmailRecipients(raw) {
@@ -916,6 +1080,15 @@ async function runOnce(cfg, statePath) {
       cfg.alertSinks.macOsNotification ? sendMacNotification(text) : Promise.resolve(),
       cfg.alertSinks.telegram ? sendTelegram(telegramText) : Promise.resolve(),
       cfg.alertSinks.email ? sendEmail(text, cfg) : Promise.resolve(),
+    ]);
+  } else if (cfg.testPing) {
+    const pingText = `Qantas reward-seat-pinger heartbeat: checked at ${new Date().toISOString()} (poll interval ${cfg.pollMinutes}m)`;
+    await Promise.all([
+      sendDiscord(cfg.alertSinks.discordWebhookUrl, pingText),
+      sendNtfy(cfg.alertSinks.ntfyTopicUrl, pingText),
+      cfg.alertSinks.macOsNotification ? sendMacNotification(pingText) : Promise.resolve(),
+      cfg.alertSinks.telegram ? sendTelegram(pingText) : Promise.resolve(),
+      cfg.alertSinks.email ? sendEmail(pingText, cfg) : Promise.resolve(),
     ]);
   }
 

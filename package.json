@@ -1,0 +1,23 @@
+{
+  "name": "reward-seat-pinger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Polls Qantas Flight Reward Finder availability and sends alerts when seat filters match.",
+  "scripts": {
+    "start": "node src/index.mjs",
+    "start:once": "node src/index.mjs --once",
+    "dev": "concurrently -k \"PORT=8787 node src/server.mjs\" \"vite web --port 5173\"",
+    "build": "vite build web --outDir dist",
+    "serve": "npm run build && node src/server.mjs"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.15",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "vite": "^5.4.19"
+  }
+}

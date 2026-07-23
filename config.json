@@ -1,0 +1,50 @@
+{
+  "apiBaseUrl": "https://flightrewardfinder.qantas.com/api/availability",
+  "originAirports": [
+    "SYD",
+    "WSI",
+    "BWU"
+  ],
+  "originRegions": [],
+  "destinationAirports": [
+    "KIX",
+    "CTS",
+    "HND",
+    "NRT"
+  ],
+  "destinationRegions": [],
+  "passengers": 2,
+  "stops": [
+    "direct",
+    "1_stop"
+  ],
+  "startMonth": "2026-12",
+  "monthCount": 1,
+  "seatFilters": {
+    "Business": 2
+  },
+  "watchDates": [
+    "2026-12-01",
+    "2026-12-02",
+    "2026-12-03",
+    "2026-12-04",
+    "2026-12-05"
+  ],
+  "watchDateRanges": [],
+  "weekdays": [],
+  "excludeDates": [],
+  "pollMinutes": 15,
+  "runImmediately": true,
+  "alertOnChangesOnly": true,
+  "stateFile": ".state/seen.json",
+  "requestTimeoutMs": 15000,
+  "alertSinks": {
+    "console": true,
+    "discordWebhookUrl": "",
+    "ntfyTopicUrl": "",
+    "macOsNotification": false,
+    "telegram": false,
+    "email": false,
+    "emailTo": ""
+  }
+}

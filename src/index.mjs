@@ -1,0 +1,821 @@
+import { execFile } from "node:child_process";
+import { promises as fs } from "node:fs";
+import nodemailer from "nodemailer";
+import path from "node:path";
+import process from "node:process";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+const DEFAULT_TIMEOUT_MS = 15000;
+const CABINS = ["Economy", "PremiumEconomy", "Business", "First"];
+
+function parseArgs(argv) {
+  const args = {
+    configPath: null,
+    once: false,
+  };
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i];
+    if (token === "--once") {
+      args.once = true;
+      continue;
+    }
+    if (token === "--config" && argv[i + 1]) {
+      args.configPath = argv[i + 1];
+      i += 1;
+    }
+  }
+
+  return args;
+}
+
+async function ensureDir(filePath) {
+  const dir = path.dirname(filePath);
+  await fs.mkdir(dir, { recursive: true });
+}
+
+async function readJson(filePath, fallback) {
+  try {
+    const raw = await fs.readFile(filePath, "utf8");
+    return JSON.parse(raw);
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return fallback;
+    }
+    throw error;
+  }
+}
+
+async function writeJson(filePath, data) {
+  await ensureDir(filePath);
+  await fs.writeFile(filePath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+}
+
+function todayMonth() {
+  const now = new Date();
+  const year = now.getUTCFullYear();
+  const month = `${now.getUTCMonth() + 1}`.padStart(2, "0");
+  return `${year}-${month}`;
+}
+
+function sanitizeConfig(rawConfig) {
+  const cfg = { ...rawConfig };
+  cfg.apiBaseUrl = cfg.apiBaseUrl || "https://flightrewardfinder.qantas.com/api/availability";
+  cfg.searchApiBaseUrl = cfg.searchApiBaseUrl || "https://flightrewardfinder.qantas.com/api/search";
+  cfg.originAirports = Array.isArray(cfg.originAirports) ? cfg.originAirports : [];
+  cfg.originRegions = Array.isArray(cfg.originRegions) ? cfg.originRegions : [];
+  cfg.destinationAirports = Array.isArray(cfg.destinationAirports) ? cfg.destinationAirports : [];
+  cfg.destinationRegions = Array.isArray(cfg.destinationRegions) ? cfg.destinationRegions : [];
+  cfg.passengers = Number.isInteger(cfg.passengers) ? cfg.passengers : 1;
+  cfg.stops = normalizeStopsForAvailability(Array.isArray(cfg.stops) ? cfg.stops : ["direct"]);
+  cfg.startMonth = cfg.startMonth === "auto" ? todayMonth() : cfg.startMonth;
+  cfg.monthCount = Number.isInteger(cfg.monthCount) ? cfg.monthCount : 4;
+  cfg.seatFilters = cfg.seatFilters && typeof cfg.seatFilters === "object" ? cfg.seatFilters : {};
+  cfg.seatFilterMode = cfg.seatFilterMode === "all" ? "all" : "any";
+  cfg.watchDates = Array.isArray(cfg.watchDates) ? cfg.watchDates : [];
+  cfg.watchDateRanges = Array.isArray(cfg.watchDateRanges) ? cfg.watchDateRanges : [];
+  cfg.weekdays = Array.isArray(cfg.weekdays) ? cfg.weekdays : [];
+  cfg.excludeDates = Array.isArray(cfg.excludeDates) ? cfg.excludeDates : [];
+  cfg.pollMinutes = Number.isFinite(cfg.pollMinutes) ? cfg.pollMinutes : 15;
+  cfg.runImmediately = cfg.runImmediately !== false;
+  cfg.alertOnChangesOnly = cfg.alertOnChangesOnly !== false;
+  cfg.stateFile = cfg.stateFile || ".state/seen.json";
+  cfg.requestTimeoutMs = Number.isFinite(cfg.requestTimeoutMs) ? cfg.requestTimeoutMs : DEFAULT_TIMEOUT_MS;
+  cfg.searchPagesMax = Number.isFinite(cfg.searchPagesMax) ? Math.max(1, Math.floor(cfg.searchPagesMax)) : 8;
+  cfg.alertSinks = cfg.alertSinks && typeof cfg.alertSinks === "object" ? cfg.alertSinks : {};
+  cfg.alertSinks.console = cfg.alertSinks.console !== false;
+  cfg.alertSinks.discordWebhookUrl = cfg.alertSinks.discordWebhookUrl || "";
+  cfg.alertSinks.ntfyTopicUrl = cfg.alertSinks.ntfyTopicUrl || "";
+  cfg.alertSinks.macOsNotification = cfg.alertSinks.macOsNotification === true;
+  cfg.alertSinks.telegram = cfg.alertSinks.telegram === true;
+  cfg.alertSinks.email = cfg.alertSinks.email === true;
+  cfg.alertSinks.emailTo = cfg.alertSinks.emailTo || "";
+
+  if (!cfg.originAirports.length && !cfg.originRegions.length) {
+    throw new Error("Config requires at least one origin airport or region.");
+  }
+  if (!cfg.destinationAirports.length && !cfg.destinationRegions.length) {
+    throw new Error("Config requires at least one destination airport or region.");
+  }
+
+  return cfg;
+}
+
+function normalizeStopsForAvailability(stops) {
+  const values = (Array.isArray(stops) ? stops : [])
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean);
+
+  if (values.length === 0) {
+    return ["direct"];
+  }
+
+  const hasDirect = values.includes("direct");
+  const hasNonDirect = values.some((value) => value !== "direct");
+
+  // Availability API only accepts direct-only or no stops filter.
+  if (hasDirect && !hasNonDirect) {
+    return ["direct"];
+  }
+
+  return [];
+}
+
+function makeAvailabilityUrl(cfg) {
+  const url = new URL(cfg.apiBaseUrl);
+
+  url.searchParams.set(
+    "origin",
+    JSON.stringify({ airports: cfg.originAirports, regions: cfg.originRegions })
+  );
+  url.searchParams.set(
+    "destination",
+    JSON.stringify({ airports: cfg.destinationAirports, regions: cfg.destinationRegions })
+  );
+  url.searchParams.set("passengers", String(cfg.passengers));
+  url.searchParams.set("stops", JSON.stringify(cfg.stops));
+  url.searchParams.set("startMonth", cfg.startMonth);
+  url.searchParams.set("monthCount", String(cfg.monthCount));
+
+  return url;
+}
+
+function makeSearchUrl(cfg, page) {
+  const url = new URL(cfg.searchApiBaseUrl);
+  const stops = cfg.stops[0] || "direct";
+
+  url.searchParams.set("o", cfg.originAirports[0] || "");
+  url.searchParams.set("d", cfg.destinationAirports.join(","));
+  url.searchParams.set("st", stops);
+  url.searchParams.set("p", String(cfg.passengers));
+  url.searchParams.set("page", String(page));
+
+  return url;
+}
+
+async function fetchJson(url, timeoutMs) {
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => abortController.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "reward-seat-pinger/0.1",
+      },
+      signal: abortController.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status} from availability API`);
+    }
+
+    return response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function isValidIsoDate(dateString) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(dateString);
+}
+
+function getWeekday(dateString) {
+  const date = new Date(`${dateString}T00:00:00Z`);
+  return date.getUTCDay();
+}
+
+function normalizeWeekday(value) {
+  if (typeof value === "number" && value >= 0 && value <= 6) {
+    return value;
+  }
+
+  const map = {
+    sun: 0,
+    sunday: 0,
+    mon: 1,
+    monday: 1,
+    tue: 2,
+    tuesday: 2,
+    wed: 3,
+    wednesday: 3,
+    thu: 4,
+    thursday: 4,
+    fri: 5,
+    friday: 5,
+    sat: 6,
+    saturday: 6,
+  };
+
+  if (typeof value === "string") {
+    const key = value.trim().toLowerCase();
+    if (key in map) {
+      return map[key];
+    }
+  }
+
+  return null;
+}
+
+function dateInRanges(dateString, ranges) {
+  for (const range of ranges) {
+    if (!range || typeof range !== "object") {
+      continue;
+    }
+    const from = range.from;
+    const to = range.to;
+    if (!isValidIsoDate(from) || !isValidIsoDate(to)) {
+      continue;
+    }
+    if (dateString >= from && dateString <= to) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function passesDateFilters(dateString, cfg) {
+  if (!isValidIsoDate(dateString)) {
+    return false;
+  }
+
+  if (cfg.excludeDates.includes(dateString)) {
+    return false;
+  }
+
+  const hasDateSelectors = cfg.watchDates.length > 0 || cfg.watchDateRanges.length > 0;
+  if (hasDateSelectors) {
+    const inList = cfg.watchDates.includes(dateString);
+    const inRanges = dateInRanges(dateString, cfg.watchDateRanges);
+    if (!inList && !inRanges) {
+      return false;
+    }
+  }
+
+  if (cfg.weekdays.length > 0) {
+    const allowedDays = new Set(
+      cfg.weekdays
+        .map(normalizeWeekday)
+        .filter((day) => day !== null)
+    );
+    if (!allowedDays.has(getWeekday(dateString))) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function evaluateSeatHits(cabinSeatMap, cfg) {
+  const filters = Object.entries(cfg.seatFilters)
+    .filter(([cabin]) => CABINS.includes(cabin))
+    .map(([cabin, minSeats]) => [cabin, Number(minSeats)]);
+
+  if (filters.length === 0) {
+    return CABINS
+      .map((cabin) => [cabin, Number(cabinSeatMap[cabin] || 0)])
+      .filter(([, seats]) => seats > 0)
+      .map(([cabin, seats]) => ({ cabin, seats }));
+  }
+
+  const hits = [];
+  for (const [cabin, minSeats] of filters) {
+    const seats = Number(cabinSeatMap[cabin] || 0);
+    if (Number.isFinite(minSeats) && seats >= minSeats) {
+      hits.push({ cabin, seats, minSeats });
+    }
+  }
+
+  if (cfg.seatFilterMode === "all" && hits.length !== filters.length) {
+    return [];
+  }
+
+  return hits;
+}
+
+function buildMatches(availabilityMap, cfg) {
+  const matches = [];
+  for (const [date, cabinSeatMap] of Object.entries(availabilityMap)) {
+    if (!passesDateFilters(date, cfg)) {
+      continue;
+    }
+
+    const hits = evaluateSeatHits(cabinSeatMap, cfg);
+    if (!hits.length) {
+      continue;
+    }
+
+    matches.push({
+      date,
+      hits,
+    });
+  }
+
+  matches.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  return matches;
+}
+
+function formatPoints(points) {
+  const value = Number(points || 0);
+  return `${value.toLocaleString("en-AU")} pts`;
+}
+
+function formatCash(currency, tax) {
+  const value = Number(tax || 0);
+  const currencyLabel = currency || "AU$";
+  if (Number.isFinite(value)) {
+    return `${currencyLabel}${value.toLocaleString("en-AU")}`;
+  }
+  return `${currencyLabel}0`;
+}
+
+function formatTimeFromIso(iso) {
+  if (!iso || typeof iso !== "string" || iso.length < 16) {
+    return "--:--";
+  }
+
+  const raw = iso.slice(11, 16);
+  const [hourRaw, minuteRaw] = raw.split(":");
+  const hour = Number(hourRaw);
+  if (!Number.isInteger(hour) || !minuteRaw) {
+    return raw;
+  }
+
+  const suffix = hour >= 12 ? "PM" : "AM";
+  const hour12 = hour % 12 === 0 ? 12 : hour % 12;
+  return `${hour12}:${minuteRaw} ${suffix}`;
+}
+
+function weekdayLabel(dateString) {
+  const date = new Date(`${dateString}T00:00:00Z`);
+  return date.toLocaleDateString("en-AU", { weekday: "short", timeZone: "UTC" });
+}
+
+function formatLongDate(dateString) {
+  const date = new Date(`${dateString}T00:00:00Z`);
+  return date.toLocaleDateString("en-AU", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function getDateFromIso(iso) {
+  if (!iso || typeof iso !== "string" || iso.length < 10) {
+    return null;
+  }
+  return iso.slice(0, 10);
+}
+
+async function fetchFlightDetails(cfg) {
+  const flights = [];
+  const seenIds = new Set();
+
+  for (let page = 1; page <= cfg.searchPagesMax; page += 1) {
+    const url = makeSearchUrl(cfg, page);
+    const data = await fetchJson(url, cfg.requestTimeoutMs);
+    const pageFlights = Array.isArray(data?.flights) ? data.flights : [];
+
+    if (pageFlights.length === 0) {
+      break;
+    }
+
+    let newCount = 0;
+    for (const flight of pageFlights) {
+      const id = String(flight?.id ?? "");
+      if (id && seenIds.has(id)) {
+        continue;
+      }
+      if (id) {
+        seenIds.add(id);
+      }
+      flights.push(flight);
+      newCount += 1;
+    }
+
+    if (newCount === 0) {
+      break;
+    }
+  }
+
+  return flights;
+}
+
+function buildFlightDetailIndex(flights) {
+  const index = new Map();
+
+  for (const flight of flights) {
+    const date = getDateFromIso(flight?.departsAt);
+    if (!date) {
+      continue;
+    }
+
+    for (const cabin of CABINS) {
+      const cabinData = flight?.cabins?.[cabin];
+      const seats = Number(cabinData?.seats || 0);
+      if (!cabinData || seats <= 0) {
+        continue;
+      }
+
+      const key = `${date}|${cabin}`;
+      const list = index.get(key) || [];
+      list.push({
+        date,
+        cabin,
+        seats,
+        points: Number(cabinData.points || 0),
+        tax: Number(cabinData.tax || 0),
+        currency: cabinData.currency || "AU$",
+        departsAt: flight.departsAt || "",
+        arrivesAt: flight.arrivesAt || "",
+        originCode: flight?.origin?.code || "",
+        originName: flight?.origin?.name || "",
+        destinationCode: flight?.destination?.code || "",
+        destinationName: flight?.destination?.name || "",
+      });
+      index.set(key, list);
+    }
+  }
+
+  for (const [key, list] of index.entries()) {
+    list.sort((a, b) => {
+      if (a.points !== b.points) {
+        return a.points - b.points;
+      }
+      if (a.tax !== b.tax) {
+        return a.tax - b.tax;
+      }
+      if (a.departsAt !== b.departsAt) {
+        return a.departsAt.localeCompare(b.departsAt);
+      }
+      return a.destinationCode.localeCompare(b.destinationCode);
+    });
+    index.set(key, list);
+  }
+
+  return index;
+}
+
+function pickDetailForHit(matchDate, hit, detailIndex) {
+  const key = `${matchDate}|${hit.cabin}`;
+  const options = detailIndex.get(key) || [];
+  const minSeats = Number(hit.minSeats || 1);
+  const filtered = options.filter((option) => option.seats >= minSeats);
+  if (filtered.length > 0) {
+    return filtered[0];
+  }
+  return options[0] || null;
+}
+
+function buildAlertText(matches, cfg, detailIndex = null) {
+  const route = `${cfg.originAirports.join(",") || "*"} -> ${cfg.destinationAirports.join(",") || "*"}`;
+  const lines = [
+    `Qantas reward seat alert (${route})`,
+    `Filters: passengers=${cfg.passengers}, stops=${cfg.stops.join(",")}, startMonth=${cfg.startMonth}, months=${cfg.monthCount}`,
+    `Matches: ${matches.length}`,
+    "",
+  ];
+
+  for (const match of matches) {
+    for (const hit of match.hits) {
+      if (detailIndex) {
+        const detail = pickDetailForHit(match.date, hit, detailIndex);
+        if (detail) {
+          const departs = formatTimeFromIso(detail.departsAt);
+          const destination = detail.destinationName
+            ? `${detail.destinationName} (${detail.destinationCode})`
+            : detail.destinationCode;
+          lines.push(
+            `${match.date} ${departs} ${hit.cabin} to ${destination} ${formatPoints(detail.points)} + ${formatCash(detail.currency, detail.tax)} (seats:${detail.seats})`
+          );
+          continue;
+        }
+      }
+
+      lines.push(`${match.date} ${hit.cabin} seats:${hit.seats}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function buildTelegramText(matches, cfg, detailIndex = null) {
+  const route = `${cfg.originAirports.join(",") || "*"} -> ${cfg.destinationAirports.join(",") || "*"}`;
+  const lines = [
+    `Qantas reward seat alert`,
+    `Route: ${route}`,
+    `Matches: ${matches.length}`,
+    "",
+  ];
+
+  for (const match of matches) {
+    lines.push(formatLongDate(match.date));
+
+    for (const hit of match.hits) {
+      const detail = detailIndex ? pickDetailForHit(match.date, hit, detailIndex) : null;
+
+      if (detail) {
+        const departs = formatTimeFromIso(detail.departsAt);
+        const destination = detail.destinationName
+          ? `${detail.destinationName} (${detail.destinationCode})`
+          : detail.destinationCode;
+        lines.push(`- ${departs} ${hit.cabin} | seats ${detail.seats} | ${formatPoints(detail.points)} + ${formatCash(detail.currency, detail.tax)} | ${destination}`);
+      } else {
+        lines.push(`- ${hit.cabin} | seats ${hit.seats}`);
+      }
+    }
+
+    lines.push("");
+  }
+
+  const message = lines.join("\n").trim();
+  return message.slice(0, 3900);
+}
+
+function signaturesForMatches(matches) {
+  const signatures = [];
+  for (const match of matches) {
+    for (const hit of match.hits) {
+      signatures.push(`${match.date}|${hit.cabin}|${hit.seats}`);
+    }
+  }
+  return signatures;
+}
+
+async function sendDiscord(webhookUrl, text) {
+  if (!webhookUrl) {
+    return;
+  }
+
+  const response = await fetch(webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content: text.slice(0, 1900) }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Discord webhook failed with HTTP ${response.status}`);
+  }
+}
+
+async function sendNtfy(topicUrl, text) {
+  if (!topicUrl) {
+    return;
+  }
+
+  const response = await fetch(topicUrl, {
+    method: "POST",
+    headers: {
+      Title: "Qantas Reward Seat Alert",
+      Priority: "high",
+      Tags: "airplane",
+      "Content-Type": "text/plain; charset=utf-8",
+    },
+    body: text,
+  });
+
+  if (!response.ok) {
+    throw new Error(`ntfy publish failed with HTTP ${response.status}`);
+  }
+}
+
+async function sendTelegram(text) {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN || "";
+  const chatId = process.env.TELEGRAM_CHAT_ID || "";
+
+  if (!botToken || !chatId) {
+    throw new Error("Telegram enabled but TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing");
+  }
+
+  const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
+  const body = new URLSearchParams({
+    chat_id: chatId,
+    text,
+    disable_web_page_preview: "true",
+  });
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+    },
+    body,
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Telegram send failed with HTTP ${response.status}: ${errText.slice(0, 240)}`);
+  }
+
+  const payload = await response.json();
+  if (!payload?.ok) {
+    throw new Error(`Telegram send failed: ${payload?.description || "Unknown error"}`);
+  }
+}
+
+function parseBooleanEnv(value) {
+  if (!value) {
+    return false;
+  }
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
+function parseEmailRecipients(raw) {
+  return String(raw || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+async function sendEmail(text, cfg) {
+  const recipients = parseEmailRecipients(cfg.alertSinks.emailTo);
+  if (recipients.length === 0) {
+    throw new Error("Email alerts enabled but alertSinks.emailTo is empty");
+  }
+
+  const smtpUrl = process.env.SMTP_URL || "";
+  const smtpHost = process.env.SMTP_HOST || "";
+  const smtpPort = Number(process.env.SMTP_PORT || 587);
+  const smtpUser = process.env.SMTP_USER || "";
+  const smtpPass = process.env.SMTP_PASS || "";
+  const smtpSecure = parseBooleanEnv(process.env.SMTP_SECURE);
+  const fromAddress = process.env.SMTP_FROM || smtpUser;
+
+  let transport;
+  if (smtpUrl) {
+    transport = nodemailer.createTransport(smtpUrl);
+  } else {
+    if (!smtpHost || !smtpUser || !smtpPass) {
+      throw new Error(
+        "Email alerts enabled but SMTP is not configured. Set SMTP_URL or SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS"
+      );
+    }
+
+    transport = nodemailer.createTransport({
+      host: smtpHost,
+      port: Number.isFinite(smtpPort) ? smtpPort : 587,
+      secure: smtpSecure,
+      auth: {
+        user: smtpUser,
+        pass: smtpPass,
+      },
+    });
+  }
+
+  await transport.sendMail({
+    from: fromAddress || "reward-seat-pinger@localhost",
+    to: recipients.join(", "),
+    subject: "Qantas Reward Seat Alert",
+    text,
+  });
+}
+
+function escapeAppleScript(value) {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+}
+
+async function sendMacNotification(text) {
+  const shortText = text.split("\n").slice(0, 3).join(" ").slice(0, 220);
+  await execFileAsync("osascript", [
+    "-e",
+    `display notification \"${escapeAppleScript(shortText)}\" with title \"Qantas Reward Alert\"`,
+  ]);
+}
+
+async function runOnce(cfg, statePath) {
+  const url = makeAvailabilityUrl(cfg);
+  const [data, flights] = await Promise.all([
+    fetchJson(url, cfg.requestTimeoutMs),
+    fetchFlightDetails(cfg),
+  ]);
+
+  if (!data || typeof data !== "object" || !data.availability) {
+    throw new Error("Unexpected API response: missing availability object");
+  }
+
+  const matches = buildMatches(data.availability, cfg);
+  const detailIndex = buildFlightDetailIndex(flights);
+  const allSignatures = signaturesForMatches(matches);
+
+  const state = await readJson(statePath, { signatures: [] });
+  const oldSet = new Set(Array.isArray(state.signatures) ? state.signatures : []);
+  const newSignatures = allSignatures.filter((sig) => !oldSet.has(sig));
+  const shouldAlert = cfg.alertOnChangesOnly ? newSignatures.length > 0 : matches.length > 0;
+
+  console.log(`[${new Date().toISOString()}] Retrieved ${Object.keys(data.availability).length} dates. Matches=${matches.length} New=${newSignatures.length}`);
+
+  if (cfg.alertSinks.console && matches.length > 0) {
+    if (cfg.alertOnChangesOnly) {
+      const freshMatchMap = new Map();
+      for (const match of matches) {
+        for (const hit of match.hits) {
+          const sig = `${match.date}|${hit.cabin}|${hit.seats}`;
+          if (newSignatures.includes(sig)) {
+            const key = match.date;
+            const existing = freshMatchMap.get(key) || [];
+            existing.push(hit);
+            freshMatchMap.set(key, existing);
+          }
+        }
+      }
+
+      const freshMatches = [...freshMatchMap.entries()].map(([date, hits]) => ({ date, hits }));
+      freshMatches.sort((a, b) => (a.date < b.date ? -1 : 1));
+
+      if (freshMatches.length > 0) {
+        const text = buildAlertText(freshMatches, cfg, detailIndex);
+        console.log(text);
+      }
+    } else {
+      const text = buildAlertText(matches, cfg, detailIndex);
+      console.log(text);
+    }
+  }
+
+  if (shouldAlert) {
+    const text = cfg.alertOnChangesOnly
+      ? buildAlertText(
+          matches.filter((match) =>
+            match.hits.some((hit) => newSignatures.includes(`${match.date}|${hit.cabin}|${hit.seats}`))
+          ),
+          cfg,
+          detailIndex
+        )
+      : buildAlertText(matches, cfg, detailIndex);
+
+    const telegramText = cfg.alertOnChangesOnly
+      ? buildTelegramText(
+          matches.filter((match) =>
+            match.hits.some((hit) => newSignatures.includes(`${match.date}|${hit.cabin}|${hit.seats}`))
+          ),
+          cfg,
+          detailIndex
+        )
+      : buildTelegramText(matches, cfg, detailIndex);
+
+    await Promise.all([
+      sendDiscord(cfg.alertSinks.discordWebhookUrl, text),
+      sendNtfy(cfg.alertSinks.ntfyTopicUrl, text),
+      cfg.alertSinks.macOsNotification ? sendMacNotification(text) : Promise.resolve(),
+      cfg.alertSinks.telegram ? sendTelegram(telegramText) : Promise.resolve(),
+      cfg.alertSinks.email ? sendEmail(text, cfg) : Promise.resolve(),
+    ]);
+  }
+
+  if (newSignatures.length > 0) {
+    const merged = new Set([...oldSet, ...newSignatures]);
+    const trimmed = [...merged].slice(-5000);
+    await writeJson(statePath, { signatures: trimmed });
+  }
+}
+
+async function loadConfig(configPath) {
+  const raw = await readJson(configPath, null);
+  if (!raw || typeof raw !== "object") {
+    throw new Error(`Could not read config JSON from ${configPath}`);
+  }
+  return sanitizeConfig(raw);
+}
+
+async function main() {
+  const argv = parseArgs(process.argv.slice(2));
+  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+  const projectRoot = path.resolve(scriptDir, "..");
+  const configPath = argv.configPath
+    ? path.resolve(process.cwd(), argv.configPath)
+    : path.resolve(projectRoot, "config.json");
+
+  const cfg = await loadConfig(configPath);
+  const statePath = path.resolve(projectRoot, cfg.stateFile);
+
+  const runCheck = async () => {
+    try {
+      await runOnce(cfg, statePath);
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] Check failed:`, error.message);
+    }
+  };
+
+  if (argv.once || cfg.pollMinutes <= 0) {
+    await runCheck();
+    return;
+  }
+
+  if (cfg.runImmediately) {
+    await runCheck();
+  }
+
+  const intervalMs = Math.max(1, cfg.pollMinutes) * 60 * 1000;
+  console.log(`Polling every ${cfg.pollMinutes} minute(s). Config: ${configPath}`);
+  setInterval(runCheck, intervalMs);
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

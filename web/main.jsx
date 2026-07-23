@@ -42,6 +42,12 @@ const dashboardMarkup = `
       </article>
     </div>
 
+    <div class="finder-summary-card">
+      <div id="watchSummary" class="watch-summary">No watched routes configured</div>
+      <div id="groupList" class="watch-group-list"></div>
+      <button id="addWatchGroup" type="button" class="secondary">Add watch group</button>
+    </div>
+
     <div class="finder-grid filters-grid">
       <article class="finder-tile compact-tile">
         <h3>Stops</h3>
@@ -136,6 +142,7 @@ const dashboardMarkup = `
       </label>
       <textarea id="watchDateRanges" rows="1"></textarea>
       <textarea id="excludeDates" rows="1"></textarea>
+      <input id="weekdays" type="text" class="hidden-field" />
       <input id="startMonth" type="month" />
       <input id="monthCount" type="number" min="1" step="1" />
     </article>

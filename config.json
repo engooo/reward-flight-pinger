@@ -13,13 +13,38 @@
     "NRT"
   ],
   "destinationRegions": [],
+  "watchGroups": [
+    {
+      "originAirports": ["SYD", "WSI", "BWU"],
+      "originRegions": [],
+      "destinationAirports": ["KIX", "CTS", "HND", "NRT"],
+      "destinationRegions": [],
+      "watchDates": [
+        "2026-12-01",
+        "2026-12-02",
+        "2026-12-03",
+        "2026-12-04",
+        "2026-12-05",
+        "2027-01-25",
+        "2027-01-26",
+        "2027-01-27",
+        "2027-01-28",
+        "2027-01-29",
+        "2027-01-30",
+        "2027-01-31"
+      ],
+      "watchDateRanges": [],
+      "weekdays": [],
+      "excludeDates": []
+    }
+  ],
   "passengers": 2,
   "stops": [
     "direct",
     "1_stop"
   ],
   "startMonth": "2026-12",
-  "monthCount": 1,
+  "monthCount": 2,
   "seatFilters": {
     "Business": 2
   },
@@ -28,7 +53,14 @@
     "2026-12-02",
     "2026-12-03",
     "2026-12-04",
-    "2026-12-05"
+    "2026-12-05",
+    "2027-01-25",
+    "2027-01-26",
+    "2027-01-27",
+    "2027-01-28",
+    "2027-01-29",
+    "2027-01-30",
+    "2027-01-31"
   ],
   "watchDateRanges": [],
   "weekdays": [],
@@ -43,7 +75,7 @@
     "discordWebhookUrl": "",
     "ntfyTopicUrl": "",
     "macOsNotification": false,
-    "telegram": false,
+    "telegram": true,
     "email": false,
     "emailTo": ""
   }

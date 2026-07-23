@@ -70,6 +70,12 @@ Error generating stack: `+u.message+`
       </article>
     </div>
 
+    <div class="finder-summary-card">
+      <div id="watchSummary" class="watch-summary">No watched routes configured</div>
+      <div id="groupList" class="watch-group-list"></div>
+      <button id="addWatchGroup" type="button" class="secondary">Add watch group</button>
+    </div>
+
     <div class="finder-grid filters-grid">
       <article class="finder-tile compact-tile">
         <h3>Stops</h3>
@@ -164,6 +170,7 @@ Error generating stack: `+u.message+`
       </label>
       <textarea id="watchDateRanges" rows="1"></textarea>
       <textarea id="excludeDates" rows="1"></textarea>
+      <input id="weekdays" type="text" class="hidden-field" />
       <input id="startMonth" type="month" />
       <input id="monthCount" type="number" min="1" step="1" />
     </article>
@@ -197,4 +204,4 @@ Error generating stack: `+u.message+`
     </section>
   </div>
 </div>
-`;function Nd(){return Uu.useEffect(()=>{rc(()=>import("./app-DnITaYq3.js"),[]).catch(e=>{console.error("Failed to initialize dashboard logic",e)})},[]),Zo.createElement("div",{dangerouslySetInnerHTML:{__html:Pd}})}const ba=document.getElementById("root");if(!ba)throw new Error("Missing root element");qa(ba).render(Zo.createElement(Nd,null));
+`;function Nd(){return Uu.useEffect(()=>{rc(()=>import("./app-DY4hzwH6.js"),[]).catch(e=>{console.error("Failed to initialize dashboard logic",e)})},[]),Zo.createElement("div",{dangerouslySetInnerHTML:{__html:Pd}})}const ba=document.getElementById("root");if(!ba)throw new Error("Missing root element");qa(ba).render(Zo.createElement(Nd,null));

@@ -106,6 +106,69 @@ h3 {
   font-weight: 600;
 }
 
+.finder-summary-card {
+  background: #fff;
+  border: 1px solid #d4dbe5;
+  border-radius: 16px;
+  padding: 16px 18px;
+  box-shadow: inset 0 0 0 1px rgba(118, 134, 152, 0.06);
+}
+
+.watch-summary {
+  display: grid;
+  gap: 6px;
+  color: var(--text);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+.watch-summary div {
+  background: #f5f7fb;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid #e3e9f0;
+}
+
+.watch-group-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.watch-group-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid #d7dde6;
+  border-radius: 14px;
+  background: #f9fafb;
+}
+
+.watch-group-label {
+  font-size: 0.92rem;
+  color: #1f2933;
+}
+
+.watch-group-remove {
+  border: 1px solid transparent;
+  background: #fff;
+  color: #d23c44;
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+button.secondary {
+  background: #f8fafc;
+  border-color: #d7dde6;
+  color: var(--text);
+}
+
+button.secondary:hover {
+  background: #eef2f6;
+}
+
 .finder-date-row {
   display: grid;
   grid-template-columns: 1fr 110px;

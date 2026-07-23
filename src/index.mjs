@@ -60,27 +60,86 @@ function todayMonth() {
   return `${year}-${month}`;
 }
 
+function normalizeArray(value) {
+  return Array.isArray(value)
+    ? value.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+}
+
+function normalizeRangeObject(raw) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const from = String(raw.from || "").trim();
+  const to = String(raw.to || "").trim();
+  if (!isValidIsoDate(from) || !isValidIsoDate(to)) {
+    return null;
+  }
+  return from <= to ? { from, to } : { from: to, to: from };
+}
+
+function unionStrings(arrays) {
+  const result = new Set();
+  for (const arr of arrays || []) {
+    if (!Array.isArray(arr)) continue;
+    for (const value of arr) {
+      if (value) {
+        result.add(String(value).trim());
+      }
+    }
+  }
+  return [...result];
+}
+
+function normalizeWatchGroup(raw) {
+  return {
+    originAirports: normalizeArray(raw.originAirports),
+    originRegions: normalizeArray(raw.originRegions),
+    destinationAirports: normalizeArray(raw.destinationAirports),
+    destinationRegions: normalizeArray(raw.destinationRegions),
+    watchDates: normalizeArray(raw.watchDates).filter(isValidIsoDate),
+    watchDateRanges: Array.isArray(raw.watchDateRanges)
+      ? raw.watchDateRanges.map(normalizeRangeObject).filter(Boolean)
+      : [],
+    weekdays: normalizeArray(raw.weekdays),
+    excludeDates: normalizeArray(raw.excludeDates).filter(isValidIsoDate),
+  };
+}
+
 function sanitizeConfig(rawConfig) {
   const cfg = { ...rawConfig };
   cfg.apiBaseUrl = cfg.apiBaseUrl || "https://flightrewardfinder.qantas.com/api/availability";
   cfg.searchApiBaseUrl = cfg.searchApiBaseUrl || "https://flightrewardfinder.qantas.com/api/search";
-  cfg.originAirports = Array.isArray(cfg.originAirports) ? cfg.originAirports : [];
-  cfg.originRegions = Array.isArray(cfg.originRegions) ? cfg.originRegions : [];
-  cfg.destinationAirports = Array.isArray(cfg.destinationAirports) ? cfg.destinationAirports : [];
-  cfg.destinationRegions = Array.isArray(cfg.destinationRegions) ? cfg.destinationRegions : [];
+  const rootGroup = {
+    originAirports: normalizeArray(cfg.originAirports),
+    originRegions: normalizeArray(cfg.originRegions),
+    destinationAirports: normalizeArray(cfg.destinationAirports),
+    destinationRegions: normalizeArray(cfg.destinationRegions),
+    watchDates: normalizeArray(cfg.watchDates).filter(isValidIsoDate),
+    watchDateRanges: Array.isArray(cfg.watchDateRanges)
+      ? cfg.watchDateRanges.map(normalizeRangeObject).filter(Boolean)
+      : [],
+    weekdays: normalizeArray(cfg.weekdays),
+    excludeDates: normalizeArray(cfg.excludeDates).filter(isValidIsoDate),
+  };
+
+  cfg.originAirports = rootGroup.originAirports;
+  cfg.originRegions = rootGroup.originRegions;
+  cfg.destinationAirports = rootGroup.destinationAirports;
+  cfg.destinationRegions = rootGroup.destinationRegions;
+  cfg.watchDates = rootGroup.watchDates;
+  cfg.watchDateRanges = rootGroup.watchDateRanges;
+  cfg.weekdays = rootGroup.weekdays;
+  cfg.excludeDates = rootGroup.excludeDates;
   cfg.passengers = Number.isInteger(cfg.passengers) ? cfg.passengers : 1;
   cfg.stops = normalizeStopsForAvailability(Array.isArray(cfg.stops) ? cfg.stops : ["direct"]);
   cfg.startMonth = cfg.startMonth === "auto" ? todayMonth() : cfg.startMonth;
   cfg.monthCount = Number.isInteger(cfg.monthCount) ? cfg.monthCount : 4;
   cfg.seatFilters = cfg.seatFilters && typeof cfg.seatFilters === "object" ? cfg.seatFilters : {};
   cfg.seatFilterMode = cfg.seatFilterMode === "all" ? "all" : "any";
-  cfg.watchDates = Array.isArray(cfg.watchDates) ? cfg.watchDates : [];
-  cfg.watchDateRanges = Array.isArray(cfg.watchDateRanges) ? cfg.watchDateRanges : [];
-  cfg.weekdays = Array.isArray(cfg.weekdays) ? cfg.weekdays : [];
-  cfg.excludeDates = Array.isArray(cfg.excludeDates) ? cfg.excludeDates : [];
   cfg.pollMinutes = Number.isFinite(cfg.pollMinutes) ? cfg.pollMinutes : 15;
   cfg.runImmediately = cfg.runImmediately !== false;
-  cfg.alertOnChangesOnly = cfg.alertOnChangesOnly !== false;
+  cfg.alertOnChangesOnly = cfg.alertOnChangesOnly !== true;
   cfg.stateFile = cfg.stateFile || ".state/seen.json";
   cfg.requestTimeoutMs = Number.isFinite(cfg.requestTimeoutMs) ? cfg.requestTimeoutMs : DEFAULT_TIMEOUT_MS;
   cfg.searchPagesMax = Number.isFinite(cfg.searchPagesMax) ? Math.max(1, Math.floor(cfg.searchPagesMax)) : 8;
@@ -93,11 +152,21 @@ function sanitizeConfig(rawConfig) {
   cfg.alertSinks.email = cfg.alertSinks.email === true;
   cfg.alertSinks.emailTo = cfg.alertSinks.emailTo || "";
 
-  if (!cfg.originAirports.length && !cfg.originRegions.length) {
-    throw new Error("Config requires at least one origin airport or region.");
+  cfg.watchGroups = Array.isArray(cfg.watchGroups)
+    ? cfg.watchGroups.map(normalizeWatchGroup)
+    : [normalizeWatchGroup(rootGroup)];
+
+  if (cfg.watchGroups.length === 0) {
+    throw new Error("Config requires at least one watch group.");
   }
-  if (!cfg.destinationAirports.length && !cfg.destinationRegions.length) {
-    throw new Error("Config requires at least one destination airport or region.");
+
+  for (const group of cfg.watchGroups) {
+    if (!group.originAirports.length && !group.originRegions.length) {
+      throw new Error("Each watch group requires at least one origin airport or region.");
+    }
+    if (!group.destinationAirports.length && !group.destinationRegions.length) {
+      throw new Error("Each watch group requires at least one destination airport or region.");
+    }
   }
 
   return cfg;
@@ -123,16 +192,22 @@ function normalizeStopsForAvailability(stops) {
   return [];
 }
 
-function makeAvailabilityUrl(cfg) {
+function routeLabelForGroup(group) {
+  const origin = group.originAirports.length > 0 ? group.originAirports.join(",") : group.originRegions.join(",") || "*";
+  const destination = group.destinationAirports.length > 0 ? group.destinationAirports.join(",") : group.destinationRegions.join(",") || "*";
+  return `${origin} -> ${destination}`;
+}
+
+function makeAvailabilityUrl(cfg, group) {
   const url = new URL(cfg.apiBaseUrl);
 
   url.searchParams.set(
     "origin",
-    JSON.stringify({ airports: cfg.originAirports, regions: cfg.originRegions })
+    JSON.stringify({ airports: group.originAirports, regions: group.originRegions })
   );
   url.searchParams.set(
     "destination",
-    JSON.stringify({ airports: cfg.destinationAirports, regions: cfg.destinationRegions })
+    JSON.stringify({ airports: group.destinationAirports, regions: group.destinationRegions })
   );
   url.searchParams.set("passengers", String(cfg.passengers));
   url.searchParams.set("stops", JSON.stringify(cfg.stops));
@@ -142,12 +217,12 @@ function makeAvailabilityUrl(cfg) {
   return url;
 }
 
-function makeSearchUrl(cfg, page) {
+function makeSearchUrl(cfg, group, page) {
   const url = new URL(cfg.searchApiBaseUrl);
   const stops = cfg.stops[0] || "direct";
 
-  url.searchParams.set("o", cfg.originAirports[0] || "");
-  url.searchParams.set("d", cfg.destinationAirports.join(","));
+  url.searchParams.set("o", group.originAirports[0] || "");
+  url.searchParams.set("d", group.destinationAirports.join(","));
   url.searchParams.set("st", stops);
   url.searchParams.set("p", String(cfg.passengers));
   url.searchParams.set("page", String(page));
@@ -237,27 +312,27 @@ function dateInRanges(dateString, ranges) {
   return false;
 }
 
-function passesDateFilters(dateString, cfg) {
+function passesDateFilters(dateString, group) {
   if (!isValidIsoDate(dateString)) {
     return false;
   }
 
-  if (cfg.excludeDates.includes(dateString)) {
+  if (group.excludeDates.includes(dateString)) {
     return false;
   }
 
-  const hasDateSelectors = cfg.watchDates.length > 0 || cfg.watchDateRanges.length > 0;
+  const hasDateSelectors = group.watchDates.length > 0 || group.watchDateRanges.length > 0;
   if (hasDateSelectors) {
-    const inList = cfg.watchDates.includes(dateString);
-    const inRanges = dateInRanges(dateString, cfg.watchDateRanges);
+    const inList = group.watchDates.includes(dateString);
+    const inRanges = dateInRanges(dateString, group.watchDateRanges);
     if (!inList && !inRanges) {
       return false;
     }
   }
 
-  if (cfg.weekdays.length > 0) {
+  if (group.weekdays.length > 0) {
     const allowedDays = new Set(
-      cfg.weekdays
+      group.weekdays
         .map(normalizeWeekday)
         .filter((day) => day !== null)
     );
@@ -296,10 +371,10 @@ function evaluateSeatHits(cabinSeatMap, cfg) {
   return hits;
 }
 
-function buildMatches(availabilityMap, cfg) {
+function buildMatches(availabilityMap, cfg, group) {
   const matches = [];
   for (const [date, cabinSeatMap] of Object.entries(availabilityMap)) {
-    if (!passesDateFilters(date, cfg)) {
+    if (!passesDateFilters(date, group)) {
       continue;
     }
 
@@ -311,6 +386,7 @@ function buildMatches(availabilityMap, cfg) {
     matches.push({
       date,
       hits,
+      group,
     });
   }
 
@@ -372,12 +448,16 @@ function getDateFromIso(iso) {
   return iso.slice(0, 10);
 }
 
-async function fetchFlightDetails(cfg) {
+async function fetchFlightDetails(cfg, group) {
   const flights = [];
   const seenIds = new Set();
+  const activeGroup = group || {
+    originAirports: cfg.originAirports,
+    destinationAirports: cfg.destinationAirports,
+  };
 
   for (let page = 1; page <= cfg.searchPagesMax; page += 1) {
-    const url = makeSearchUrl(cfg, page);
+    const url = makeSearchUrl(cfg, activeGroup, page);
     const data = await fetchJson(url, cfg.requestTimeoutMs);
     const pageFlights = Array.isArray(data?.flights) ? data.flights : [];
 
@@ -472,8 +552,8 @@ function pickDetailForHit(matchDate, hit, detailIndex) {
   return options[0] || null;
 }
 
-function buildAlertText(matches, cfg, detailIndex = null) {
-  const route = `${cfg.originAirports.join(",") || "*"} -> ${cfg.destinationAirports.join(",") || "*"}`;
+function buildAlertTextForGroup(group, matches, cfg, detailIndex = null) {
+  const route = routeLabelForGroup(group);
   const lines = [
     `Qantas reward seat alert (${route})`,
     `Filters: passengers=${cfg.passengers}, stops=${cfg.stops.join(",")}, startMonth=${cfg.startMonth}, months=${cfg.monthCount}`,
@@ -504,8 +584,8 @@ function buildAlertText(matches, cfg, detailIndex = null) {
   return lines.join("\n");
 }
 
-function buildTelegramText(matches, cfg, detailIndex = null) {
-  const route = `${cfg.originAirports.join(",") || "*"} -> ${cfg.destinationAirports.join(",") || "*"}`;
+function buildTelegramTextForGroup(group, matches, cfg, detailIndex = null) {
+  const route = routeLabelForGroup(group);
   const lines = [
     `Qantas reward seat alert`,
     `Route: ${route}`,
@@ -540,8 +620,9 @@ function buildTelegramText(matches, cfg, detailIndex = null) {
 function signaturesForMatches(matches) {
   const signatures = [];
   for (const match of matches) {
+    const route = routeLabelForGroup(match.group || {});
     for (const hit of match.hits) {
-      signatures.push(`${match.date}|${hit.cabin}|${hit.seats}`);
+      signatures.push(`${route}|${match.date}|${hit.cabin}|${hit.seats}`);
     }
   }
   return signatures;
@@ -688,75 +769,115 @@ async function sendMacNotification(text) {
 }
 
 async function runOnce(cfg, statePath) {
-  const url = makeAvailabilityUrl(cfg);
-  const [data, flights] = await Promise.all([
-    fetchJson(url, cfg.requestTimeoutMs),
-    fetchFlightDetails(cfg),
-  ]);
-
-  if (!data || typeof data !== "object" || !data.availability) {
-    throw new Error("Unexpected API response: missing availability object");
+  const groups = Array.isArray(cfg.watchGroups) ? cfg.watchGroups : [];
+  if (groups.length === 0) {
+    throw new Error("Config requires at least one watch group.");
   }
 
-  const matches = buildMatches(data.availability, cfg);
-  const detailIndex = buildFlightDetailIndex(flights);
-  const allSignatures = signaturesForMatches(matches);
+  const results = [];
+  for (const group of groups) {
+    if (
+      group.originAirports.length === 0 &&
+      group.originRegions.length === 0
+    ) {
+      throw new Error("Each watch group requires at least one origin airport or region.");
+    }
+    if (
+      group.destinationAirports.length === 0 &&
+      group.destinationRegions.length === 0
+    ) {
+      throw new Error("Each watch group requires at least one destination airport or region.");
+    }
+
+    const url = makeAvailabilityUrl(cfg, group);
+    const [data, flights] = await Promise.all([
+      fetchJson(url, cfg.requestTimeoutMs),
+      fetchFlightDetails(cfg, group),
+    ]);
+
+    if (!data || typeof data !== "object" || !data.availability) {
+      throw new Error("Unexpected API response: missing availability object");
+    }
+
+    const matches = buildMatches(data.availability, cfg, group);
+    const detailIndex = buildFlightDetailIndex(flights);
+
+    results.push({ group, matches, detailIndex, dateCount: Object.keys(data.availability).length });
+  }
+
+  const allMatches = results.flatMap((result) => result.matches);
+  const allSignatures = signaturesForMatches(allMatches);
 
   const state = await readJson(statePath, { signatures: [] });
   const oldSet = new Set(Array.isArray(state.signatures) ? state.signatures : []);
-  const newSignatures = allSignatures.filter((sig) => !oldSet.has(sig));
-  const shouldAlert = cfg.alertOnChangesOnly ? newSignatures.length > 0 : matches.length > 0;
+  const newSignatures = allSignatures.filter((sig) => {
+    if (oldSet.has(sig)) {
+      return false;
+    }
+    const parts = sig.split("|");
+    const legacySig = parts.slice(-3).join("|");
+    return !oldSet.has(legacySig);
+  });
+  const shouldAlert = cfg.alertOnChangesOnly ? newSignatures.length > 0 : allMatches.length > 0;
 
-  console.log(`[${new Date().toISOString()}] Retrieved ${Object.keys(data.availability).length} dates. Matches=${matches.length} New=${newSignatures.length}`);
+  const totalDates = results.reduce((sum, result) => sum + result.dateCount, 0);
+  const matchSummary = results
+    .map((result, index) => `${routeLabelForGroup(result.group)}=${result.matches.length}`)
+    .join(", ");
+  console.log(`[${new Date().toISOString()}] Retrieved ${totalDates} dates. Matches=${allMatches.length} New=${newSignatures.length}. Groups: ${matchSummary}`);
 
-  if (cfg.alertSinks.console && matches.length > 0) {
+  if (cfg.alertSinks.console && allMatches.length > 0) {
     if (cfg.alertOnChangesOnly) {
-      const freshMatchMap = new Map();
-      for (const match of matches) {
-        for (const hit of match.hits) {
-          const sig = `${match.date}|${hit.cabin}|${hit.seats}`;
-          if (newSignatures.includes(sig)) {
-            const key = match.date;
-            const existing = freshMatchMap.get(key) || [];
-            existing.push(hit);
-            freshMatchMap.set(key, existing);
-          }
-        }
-      }
+      const freshGroups = results.map((result) => {
+        const freshMatches = result.matches
+          .map((match) => {
+            const freshHits = match.hits.filter((hit) => {
+              const sig = `${routeLabelForGroup(result.group)}|${match.date}|${hit.cabin}|${hit.seats}`;
+              const legacySig = `${match.date}|${hit.cabin}|${hit.seats}`;
+              return newSignatures.includes(sig) && !oldSet.has(legacySig);
+            });
+            return freshHits.length > 0
+              ? { ...match, hits: freshHits }
+              : null;
+          })
+          .filter(Boolean);
 
-      const freshMatches = [...freshMatchMap.entries()].map(([date, hits]) => ({ date, hits }));
-      freshMatches.sort((a, b) => (a.date < b.date ? -1 : 1));
+        return { group: result.group, matches: freshMatches, detailIndex: result.detailIndex };
+      }).filter((entry) => entry.matches.length > 0);
 
-      if (freshMatches.length > 0) {
-        const text = buildAlertText(freshMatches, cfg, detailIndex);
+      for (const entry of freshGroups) {
+        const text = buildAlertTextForGroup(entry.group, entry.matches, cfg, entry.detailIndex);
         console.log(text);
       }
     } else {
-      const text = buildAlertText(matches, cfg, detailIndex);
-      console.log(text);
+      for (const result of results) {
+        if (result.matches.length > 0) {
+          const text = buildAlertTextForGroup(result.group, result.matches, cfg, result.detailIndex);
+          console.log(text);
+        }
+      }
     }
   }
 
   if (shouldAlert) {
-    const text = cfg.alertOnChangesOnly
-      ? buildAlertText(
-          matches.filter((match) =>
-            match.hits.some((hit) => newSignatures.includes(`${match.date}|${hit.cabin}|${hit.seats}`))
-          ),
-          cfg,
-          detailIndex
-        )
-      : buildAlertText(matches, cfg, detailIndex);
+    const alertGroups = results.map((result) => {
+      const filteredMatches = result.matches.filter((match) =>
+        match.hits.some((hit) => {
+          const sig = `${routeLabelForGroup(result.group)}|${match.date}|${hit.cabin}|${hit.seats}`;
+          const legacySig = `${match.date}|${hit.cabin}|${hit.seats}`;
+          return !cfg.alertOnChangesOnly || newSignatures.includes(sig) && !oldSet.has(legacySig);
+        })
+      );
+      return { group: result.group, matches: filteredMatches, detailIndex: result.detailIndex };
+    }).filter((entry) => entry.matches.length > 0);
 
-    const telegramText = cfg.alertOnChangesOnly
-      ? buildTelegramText(
-          matches.filter((match) =>
-            match.hits.some((hit) => newSignatures.includes(`${match.date}|${hit.cabin}|${hit.seats}`))
-          ),
-          cfg,
-          detailIndex
-        )
-      : buildTelegramText(matches, cfg, detailIndex);
+    const text = alertGroups
+      .map((entry) => buildAlertTextForGroup(entry.group, entry.matches, cfg, entry.detailIndex))
+      .join("\n\n");
+
+    const telegramText = alertGroups
+      .map((entry) => buildTelegramTextForGroup(entry.group, entry.matches, cfg, entry.detailIndex))
+      .join("\n\n");
 
     await Promise.all([
       sendDiscord(cfg.alertSinks.discordWebhookUrl, text),

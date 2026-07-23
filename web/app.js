@@ -1,6 +1,7 @@
 const outputEl = document.getElementById("output");
 const watcherStatusEl = document.getElementById("watcherStatus");
 const dateSummaryEl = document.getElementById("dateSummary");
+const watchSummaryEl = document.getElementById("watchSummary");
 
 const modalEl = document.getElementById("datePickerModal");
 const monthListEl = document.getElementById("monthList");
@@ -9,7 +10,41 @@ const calendarGridEl = document.getElementById("calendarGrid");
 const rangeHintEl = document.getElementById("rangeHint");
 
 const monthFormatter = new Intl.DateTimeFormat("en-AU", { month: "long", year: "numeric", timeZone: "UTC" });
+const displayDateFormatter = new Intl.DateTimeFormat("en-AU", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 const weekdayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function formatDateLabel(isoDate) {
+  if (!isIsoDate(isoDate)) return String(isoDate);
+  return displayDateFormatter.format(new Date(`${isoDate}T00:00:00Z`));
+}
+
+function formatDateRange(range) {
+  if (!range || !range.from || !range.to) return "";
+  const fromLabel = formatDateLabel(range.from);
+  const toLabel = formatDateLabel(range.to);
+  return fromLabel === toLabel ? fromLabel : `${fromLabel} - ${toLabel}`;
+}
+
+function normalizeDateListToRanges(dates) {
+  const sorted = Array.from(new Set((dates || []).filter(isIsoDate))).sort();
+  const ranges = [];
+  for (const date of sorted) {
+    if (ranges.length === 0) {
+      ranges.push({ from: date, to: date });
+      continue;
+    }
+    const previous = ranges[ranges.length - 1];
+    const nextDay = new Date(`${previous.to}T00:00:00Z`);
+    nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+    const nextIso = nextDay.toISOString().slice(0, 10);
+    if (date === nextIso) {
+      previous.to = date;
+    } else {
+      ranges.push({ from: date, to: date });
+    }
+  }
+  return ranges;
+}
 
 const pickerState = {
   mode: "watch",
@@ -35,6 +70,7 @@ const routeState = {
     origin: 0,
     destination: 0,
   },
+  watchGroups: [],
 };
 
 const CABINS = ["Economy", "PremiumEconomy", "Business", "First"];
@@ -90,11 +126,13 @@ function rangesToText(ranges) {
 }
 
 function bool(elId) {
-  return document.getElementById(elId).checked;
+  const element = document.getElementById(elId);
+  return element ? element.checked : false;
 }
 
 function value(elId) {
-  return document.getElementById(elId).value;
+  const element = document.getElementById(elId);
+  return element ? element.value : "";
 }
 
 function numberOrNull(elId) {
@@ -211,6 +249,7 @@ function renderAirportChips(kind) {
     chip.appendChild(removeBtn);
     listEl.appendChild(chip);
   }
+  summarizeWatchSummary();
 }
 
 function hideSuggestions(kind) {
@@ -225,6 +264,7 @@ function addAirportSelection(kind, item) {
     target.push(item);
   }
   renderAirportChips(kind);
+  summarizeWatchSummary();
 }
 
 function removeAirportSelection(kind, iataCode) {
@@ -234,6 +274,7 @@ function removeAirportSelection(kind, iataCode) {
     routeState.destinationAirports = routeState.destinationAirports.filter((a) => a.iataCode !== iataCode);
   }
   renderAirportChips(kind);
+  summarizeWatchSummary();
 }
 
 function isAirportSelected(kind, iataCode) {
@@ -447,6 +488,136 @@ function monthDays(monthValue) {
 function summarizeDateRules() {
   const watchCount = parseLines(value("watchDates")).length;
   dateSummaryEl.textContent = watchCount > 0 ? `${watchCount} travel date${watchCount === 1 ? "" : "s"} selected` : "No travel dates selected";
+  summarizeWatchSummary();
+}
+
+function currentGroupFromFields() {
+  return {
+    originAirports: routeState.originAirports.map((item) => item.iataCode),
+    originRegions: parseList(value("originRegions")),
+    destinationAirports: routeState.destinationAirports.map((item) => item.iataCode),
+    destinationRegions: parseList(value("destinationRegions")),
+    watchDates: parseLines(value("watchDates")).filter(isIsoDate),
+    watchDateRanges: rangesFromText(value("watchDateRanges")),
+    weekdays: parseLines(value("weekdays")),
+    excludeDates: parseLines(value("excludeDates")).filter(isIsoDate),
+  };
+}
+
+function rangeListToText(ranges) {
+  if (!Array.isArray(ranges)) return "";
+  return ranges
+    .map((range) => formatDateRange(range))
+    .filter(Boolean)
+    .join(", ");
+}
+
+function formatGroupSummary(group) {
+  const origin = group.originAirports.length > 0
+    ? group.originAirports.join(", ")
+    : group.originRegions.join(", ") || "*";
+  const destination = group.destinationAirports.length > 0
+    ? group.destinationAirports.join(", ")
+    : group.destinationRegions.join(", ") || "*";
+  const dateParts = [];
+  if (Array.isArray(group.watchDates) && group.watchDates.length > 0) {
+    const ranges = normalizeDateListToRanges(group.watchDates);
+    dateParts.push(`Dates: ${rangeListToText(ranges)}`);
+  }
+  if (Array.isArray(group.watchDateRanges) && group.watchDateRanges.length > 0) {
+    dateParts.push(`Ranges: ${rangeListToText(group.watchDateRanges)}`);
+  }
+  const dateSummary = dateParts.length > 0 ? ` | ${dateParts.join(" | ")}` : " | All dates";
+  return `${origin} → ${destination}${dateSummary}`;
+}
+
+function renderWatchGroups() {
+  const listEl = document.getElementById("groupList");
+  if (!listEl) return;
+
+  listEl.innerHTML = "";
+  if (routeState.watchGroups.length === 0) {
+    return;
+  }
+
+  routeState.watchGroups.forEach((group, index) => {
+    const card = document.createElement("div");
+    card.className = "watch-group-card";
+
+    const label = document.createElement("div");
+    label.className = "watch-group-label";
+    label.textContent = formatGroupSummary(group);
+    card.appendChild(label);
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "watch-group-remove";
+    removeBtn.textContent = "Remove";
+    removeBtn.addEventListener("click", () => {
+      removeWatchGroup(index);
+    });
+    card.appendChild(removeBtn);
+
+    listEl.appendChild(card);
+  });
+}
+
+function addWatchGroup() {
+  const group = currentGroupFromFields();
+  if (group.originAirports.length === 0 && group.originRegions.length === 0) {
+    appendOutput("Cannot add watch group without an origin.");
+    return;
+  }
+  if (group.destinationAirports.length === 0 && group.destinationRegions.length === 0) {
+    appendOutput("Cannot add watch group without a destination.");
+    return;
+  }
+
+  routeState.watchGroups.push(group);
+  renderWatchGroups();
+  summarizeWatchSummary();
+  appendOutput(`Added watch group: ${formatGroupSummary(group)}`);
+}
+
+function removeWatchGroup(index) {
+  routeState.watchGroups.splice(index, 1);
+  renderWatchGroups();
+  summarizeWatchSummary();
+}
+
+function summarizeWatchSummary() {
+  const originCodes = routeState.originAirports.map((item) => item.iataCode);
+  const destinationCodes = routeState.destinationAirports.map((item) => item.iataCode);
+  const watchDates = parseLines(value("watchDates")).filter(isIsoDate);
+  const watchDateRanges = rangesFromText(value("watchDateRanges"));
+  const currentGroup = currentGroupFromFields();
+
+  const routeSummary = originCodes.length > 0 && destinationCodes.length > 0
+    ? `Current group: ${originCodes.join(", ")} → ${destinationCodes.join(", ")}`
+    : "Current group: no route configured";
+
+  let dateSummary = "No travel dates selected";
+  const dateParts = [];
+  if (watchDates.length > 0) {
+    const ranges = normalizeDateListToRanges(watchDates);
+    dateParts.push(`Dates: ${rangeListToText(ranges)}`);
+  }
+  if (watchDateRanges.length > 0) {
+    dateParts.push(`Ranges: ${rangeListToText(watchDateRanges)}`);
+  }
+  if (dateParts.length > 0) {
+    dateSummary = dateParts.join(" | ");
+  }
+
+  const groupCountText = routeState.watchGroups.length > 0
+    ? `${routeState.watchGroups.length} saved watch group${routeState.watchGroups.length === 1 ? "" : "s"}`
+    : "No saved watch groups";
+
+  if (watchSummaryEl) {
+    watchSummaryEl.innerHTML = `<div>${routeSummary}</div><div>${dateSummary}</div><div>${groupCountText}</div>`;
+  }
+
+  renderWatchGroups();
 }
 
 function readPickerDataFromFields() {
@@ -621,16 +792,39 @@ function deriveMonthWindowFromDates(dates) {
   return { startMonth: firstMonth, monthCount: count };
 }
 
-function fillForm(config) {
-  const originCodes = (config.originAirports || []).map((code) => ({ iataCode: String(code).toUpperCase(), airportName: String(code).toUpperCase(), city: "", country: "" }));
-  const destinationCodes = (config.destinationAirports || []).map((code) => ({ iataCode: String(code).toUpperCase(), airportName: String(code).toUpperCase(), city: "", country: "" }));
+function loadGroupIntoFields(group) {
+  const originCodes = (group.originAirports || []).map((code) => ({ iataCode: String(code).toUpperCase(), airportName: String(code).toUpperCase(), city: "", country: "" }));
+  const destinationCodes = (group.destinationAirports || []).map((code) => ({ iataCode: String(code).toUpperCase(), airportName: String(code).toUpperCase(), city: "", country: "" }));
   routeState.originAirports = uniqueCodes(originCodes);
   routeState.destinationAirports = uniqueCodes(destinationCodes);
   renderAirportChips("origin");
   renderAirportChips("destination");
 
-  document.getElementById("originRegions").value = (config.originRegions || []).join(", ");
-  document.getElementById("destinationRegions").value = (config.destinationRegions || []).join(", ");
+  document.getElementById("originRegions").value = (group.originRegions || []).join(", ");
+  document.getElementById("destinationRegions").value = (group.destinationRegions || []).join(", ");
+  document.getElementById("watchDates").value = (group.watchDates || []).join("\n");
+  document.getElementById("watchDateRanges").value = rangesToText(group.watchDateRanges || []);
+  document.getElementById("excludeDates").value = (group.excludeDates || []).join("\n");
+}
+
+function fillForm(config) {
+  const groups = Array.isArray(config.watchGroups) && config.watchGroups.length > 0
+    ? config.watchGroups
+    : [{
+        originAirports: config.originAirports || [],
+        originRegions: config.originRegions || [],
+        destinationAirports: config.destinationAirports || [],
+        destinationRegions: config.destinationRegions || [],
+        watchDates: config.watchDates || [],
+        watchDateRanges: config.watchDateRanges || [],
+        weekdays: config.weekdays || [],
+        excludeDates: config.excludeDates || [],
+      }];
+
+  const [primaryGroup, ...savedGroups] = groups;
+  routeState.watchGroups = savedGroups;
+  loadGroupIntoFields(primaryGroup);
+
   document.getElementById("passengers").value = config.passengers ?? 1;
   const stopTokens = stopTokensFromConfig(config.stops || []);
   document.getElementById("stopsDirect").checked = stopTokens.direct;
@@ -653,10 +847,6 @@ function fillForm(config) {
   document.getElementById("seatCabinFirst").checked = selectedCabins.includes("First");
   applyCabinAnyBehavior();
 
-  document.getElementById("watchDates").value = (config.watchDates || []).join("\n");
-  document.getElementById("watchDateRanges").value = rangesToText(config.watchDateRanges || []);
-  document.getElementById("excludeDates").value = (config.excludeDates || []).join("\n");
-
   document.getElementById("pollMinutes").value = config.pollMinutes ?? 15;
   document.getElementById("runImmediately").checked = config.runImmediately !== false;
   document.getElementById("alertOnChangesOnly").checked = config.alertOnChangesOnly !== false;
@@ -673,6 +863,8 @@ function fillForm(config) {
   document.getElementById("emailTo").value = sinks.emailTo || "";
 
   summarizeDateRules();
+  renderWatchGroups();
+  summarizeWatchSummary();
 }
 
 function collectConfig() {
@@ -680,6 +872,9 @@ function collectConfig() {
   const seatMinCount = numberOrNull("seatMinCount");
   const anyCabin = bool("seatCabinAny");
   const watchDates = parseLines(value("watchDates")).filter(isIsoDate).sort();
+  const watchDateRanges = rangesFromText(value("watchDateRanges"));
+  const weekdays = parseLines(value("weekdays"));
+  const excludeDates = parseLines(value("excludeDates")).filter(isIsoDate);
   const monthWindow = deriveMonthWindowFromDates(watchDates);
 
   if (seatMinCount !== null) {
@@ -699,21 +894,34 @@ function collectConfig() {
     }
   }
 
+  const currentGroup = currentGroupFromFields();
+  const watchGroups = [];
+
+  if (
+    (currentGroup.originAirports.length > 0 || currentGroup.originRegions.length > 0) &&
+    (currentGroup.destinationAirports.length > 0 || currentGroup.destinationRegions.length > 0)
+  ) {
+    watchGroups.push(currentGroup);
+  }
+
+  watchGroups.push(...routeState.watchGroups);
+
   return {
     apiBaseUrl: "https://flightrewardfinder.qantas.com/api/availability",
-    originAirports: routeState.originAirports.map((item) => item.iataCode),
-    originRegions: parseList(value("originRegions")),
-    destinationAirports: routeState.destinationAirports.map((item) => item.iataCode),
-    destinationRegions: parseList(value("destinationRegions")),
+    originAirports: currentGroup.originAirports,
+    originRegions: currentGroup.originRegions,
+    destinationAirports: currentGroup.destinationAirports,
+    destinationRegions: currentGroup.destinationRegions,
     passengers: Number(value("passengers") || 1),
     stops: selectedStopsFromForm(),
     startMonth: monthWindow.startMonth,
     monthCount: monthWindow.monthCount,
     seatFilters,
     watchDates,
-    watchDateRanges: [],
-    weekdays: [],
-    excludeDates: [],
+    watchDateRanges,
+    weekdays,
+    excludeDates,
+    watchGroups,
     pollMinutes: Number(value("pollMinutes") || 15),
     runImmediately: bool("runImmediately"),
     alertOnChangesOnly: bool("alertOnChangesOnly"),
@@ -882,6 +1090,7 @@ document.getElementById("watchDates").addEventListener("input", summarizeDateRul
 document.getElementById("watchDateRanges").addEventListener("input", summarizeDateRules);
 document.getElementById("excludeDates").addEventListener("input", summarizeDateRules);
 document.getElementById("seatCabinAny").addEventListener("change", applyCabinAnyBehavior);
+document.getElementById("addWatchGroup").addEventListener("click", addWatchGroup);
 
 bindAirportSearch("origin");
 bindAirportSearch("destination");

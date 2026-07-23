@@ -1,9 +1,7 @@
 {
   "apiBaseUrl": "https://flightrewardfinder.qantas.com/api/availability",
   "originAirports": [
-    "SYD",
-    "WSI",
-    "BWU"
+    "SYD"
   ],
   "originRegions": [],
   "destinationAirports": [

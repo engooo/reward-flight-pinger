@@ -220,9 +220,19 @@ function makeAvailabilityUrl(cfg, group) {
 function makeSearchUrl(cfg, group, page) {
   const url = new URL(cfg.searchApiBaseUrl);
   const stops = cfg.stops[0] || "direct";
+  const origin = Array.isArray(group.originAirports) && group.originAirports.length > 0
+    ? group.originAirports.join(",")
+    : Array.isArray(group.originRegions) && group.originRegions.length > 0
+      ? group.originRegions.join(",")
+      : "";
+  const destination = Array.isArray(group.destinationAirports) && group.destinationAirports.length > 0
+    ? group.destinationAirports.join(",")
+    : Array.isArray(group.destinationRegions) && group.destinationRegions.length > 0
+      ? group.destinationRegions.join(",")
+      : "";
 
-  url.searchParams.set("o", group.originAirports[0] || "");
-  url.searchParams.set("d", group.destinationAirports.join(","));
+  url.searchParams.set("o", origin);
+  url.searchParams.set("d", destination);
   url.searchParams.set("st", stops);
   url.searchParams.set("p", String(cfg.passengers));
   url.searchParams.set("page", String(page));
@@ -495,6 +505,9 @@ function buildFlightDetailIndex(flights) {
       continue;
     }
 
+    const originCode = flight?.origin?.code || "";
+    const destinationCode = flight?.destination?.code || "";
+
     for (const cabin of CABINS) {
       const cabinData = flight?.cabins?.[cabin];
       const seats = Number(cabinData?.seats || 0);
@@ -503,8 +516,8 @@ function buildFlightDetailIndex(flights) {
       }
 
       const key = `${date}|${cabin}`;
-      const list = index.get(key) || [];
-      list.push({
+      const routeKey = `${date}|${cabin}|${originCode}|${destinationCode}`;
+      const entry = {
         date,
         cabin,
         seats,
@@ -513,12 +526,22 @@ function buildFlightDetailIndex(flights) {
         currency: cabinData.currency || "AU$",
         departsAt: flight.departsAt || "",
         arrivesAt: flight.arrivesAt || "",
-        originCode: flight?.origin?.code || "",
+        originCode,
         originName: flight?.origin?.name || "",
-        destinationCode: flight?.destination?.code || "",
+        destinationCode,
         destinationName: flight?.destination?.name || "",
-      });
-      index.set(key, list);
+      };
+
+      const append = (keyToUse) => {
+        const list = index.get(keyToUse) || [];
+        list.push(entry);
+        index.set(keyToUse, list);
+      };
+
+      append(key);
+      if (originCode || destinationCode) {
+        append(routeKey);
+      }
     }
   }
 
@@ -555,9 +578,9 @@ function pickDetailForHit(matchDate, hit, detailIndex) {
 function buildAlertTextForGroup(group, matches, cfg, detailIndex = null) {
   const route = routeLabelForGroup(group);
   const lines = [
-    `Qantas reward seat alert (${route})`,
-    `Filters: passengers=${cfg.passengers}, stops=${cfg.stops.join(",")}, startMonth=${cfg.startMonth}, months=${cfg.monthCount}`,
-    `Matches: ${matches.length}`,
+    `✈️ Qantas reward seat alert — ${route}`,
+    `🧭 Filters: passengers=${cfg.passengers}, stops=${cfg.stops.join(",")}, startMonth=${cfg.startMonth}, months=${cfg.monthCount}`,
+    `✅ Matches: ${matches.length}`,
     "",
   ];
 
@@ -567,17 +590,20 @@ function buildAlertTextForGroup(group, matches, cfg, detailIndex = null) {
         const detail = pickDetailForHit(match.date, hit, detailIndex);
         if (detail) {
           const departs = formatTimeFromIso(detail.departsAt);
+          const origin = detail.originName
+            ? `${detail.originName} (${detail.originCode})`
+            : detail.originCode;
           const destination = detail.destinationName
             ? `${detail.destinationName} (${detail.destinationCode})`
             : detail.destinationCode;
           lines.push(
-            `${match.date} ${departs} ${hit.cabin} to ${destination} ${formatPoints(detail.points)} + ${formatCash(detail.currency, detail.tax)} (seats:${detail.seats})`
+            `• ${match.date} ${departs} | ${hit.cabin} | ${origin} → ${destination} | ${formatPoints(detail.points)} + ${formatCash(detail.currency, detail.tax)} | seats:${detail.seats}`
           );
           continue;
         }
       }
 
-      lines.push(`${match.date} ${hit.cabin} seats:${hit.seats}`);
+      lines.push(`• ${match.date} | ${hit.cabin} | seats:${hit.seats}`);
     }
   }
 
@@ -587,26 +613,31 @@ function buildAlertTextForGroup(group, matches, cfg, detailIndex = null) {
 function buildTelegramTextForGroup(group, matches, cfg, detailIndex = null) {
   const route = routeLabelForGroup(group);
   const lines = [
-    `Qantas reward seat alert`,
-    `Route: ${route}`,
-    `Matches: ${matches.length}`,
+    `✈️ Qantas reward seat alert`,
+    `📍 Route: ${route}`,
+    `✅ Matches: ${matches.length}`,
     "",
   ];
 
   for (const match of matches) {
-    lines.push(formatLongDate(match.date));
+    lines.push(`📅 ${formatLongDate(match.date)}`);
 
     for (const hit of match.hits) {
       const detail = detailIndex ? pickDetailForHit(match.date, hit, detailIndex) : null;
 
       if (detail) {
         const departs = formatTimeFromIso(detail.departsAt);
+        const origin = detail.originName
+          ? `${detail.originName} (${detail.originCode})`
+          : detail.originCode;
         const destination = detail.destinationName
           ? `${detail.destinationName} (${detail.destinationCode})`
           : detail.destinationCode;
-        lines.push(`- ${departs} ${hit.cabin} | seats ${detail.seats} | ${formatPoints(detail.points)} + ${formatCash(detail.currency, detail.tax)} | ${destination}`);
+        lines.push(
+          `• ${departs} | ${hit.cabin} | ${origin} → ${destination} | seats ${detail.seats} | ${formatPoints(detail.points)} + ${formatCash(detail.currency, detail.tax)}`
+        );
       } else {
-        lines.push(`- ${hit.cabin} | seats ${hit.seats}`);
+        lines.push(`• ${hit.cabin} | seats ${hit.seats}`);
       }
     }
 

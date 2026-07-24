@@ -108,7 +108,6 @@ function normalizeWatchGroup(raw) {
 
 function sanitizeConfig(rawConfig) {
   const cfg = { ...rawConfig };
-  cfg.apiBaseUrl = cfg.apiBaseUrl || "https://flightrewardfinder.qantas.com/api/availability";
   cfg.searchApiBaseUrl = cfg.searchApiBaseUrl || "https://flightrewardfinder.qantas.com/api/search";
   const rootGroup = {
     originAirports: normalizeArray(cfg.originAirports),
@@ -141,10 +140,10 @@ function sanitizeConfig(rawConfig) {
   cfg.seatFilterMode = cfg.seatFilterMode === "all" ? "all" : "any";
   cfg.pollMinutes = Number.isFinite(cfg.pollMinutes) ? cfg.pollMinutes : 15;
   cfg.runImmediately = cfg.runImmediately !== false;
-  cfg.alertOnChangesOnly = cfg.alertOnChangesOnly !== true;
+  cfg.alertOnChangesOnly = cfg.alertOnChangesOnly !== false;
   cfg.stateFile = cfg.stateFile || ".state/seen.json";
   cfg.requestTimeoutMs = Number.isFinite(cfg.requestTimeoutMs) ? cfg.requestTimeoutMs : DEFAULT_TIMEOUT_MS;
-  cfg.searchPagesMax = Number.isFinite(cfg.searchPagesMax) ? Math.max(1, Math.floor(cfg.searchPagesMax)) : 8;
+  cfg.searchPagesMax = Number.isFinite(cfg.searchPagesMax) ? Math.max(1, Math.floor(cfg.searchPagesMax)) : 30;
   cfg.alertSinks = cfg.alertSinks && typeof cfg.alertSinks === "object" ? cfg.alertSinks : {};
   cfg.alertSinks.console = cfg.alertSinks.console !== false;
   cfg.alertSinks.discordWebhookUrl = cfg.alertSinks.discordWebhookUrl || "";
@@ -187,7 +186,7 @@ function normalizeStopsForAvailability(stops) {
   const hasDirect = values.includes("direct");
   const hasNonDirect = values.some((value) => value !== "direct");
 
-  // Availability API only accepts direct-only or no stops filter.
+  // Legacy compatibility: collapse mixed stop values to an empty/default set.
   if (hasDirect && !hasNonDirect) {
     return ["direct"];
   }
@@ -261,25 +260,6 @@ function routeLabelForGroup(group) {
   return `${origin} -> ${destination}`;
 }
 
-function makeAvailabilityUrl(cfg, group) {
-  const url = new URL(cfg.apiBaseUrl);
-
-  url.searchParams.set(
-    "origin",
-    JSON.stringify({ airports: group.originAirports, regions: group.originRegions })
-  );
-  url.searchParams.set(
-    "destination",
-    JSON.stringify({ airports: group.destinationAirports, regions: group.destinationRegions })
-  );
-  url.searchParams.set("passengers", String(cfg.passengers));
-  url.searchParams.set("stops", JSON.stringify(cfg.stops));
-  url.searchParams.set("startMonth", cfg.startMonth);
-  url.searchParams.set("monthCount", String(cfg.monthCount));
-
-  return url;
-}
-
 function makeSearchUrl(cfg, group, page) {
   const url = new URL(cfg.searchApiBaseUrl);
   const searchStops = Array.isArray(cfg.searchStops) && cfg.searchStops.length > 0
@@ -328,7 +308,7 @@ async function fetchJson(url, timeoutMs) {
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status} from availability API`);
+      throw new Error(`HTTP ${response.status} from API`);
     }
 
     return response.json();
@@ -454,13 +434,34 @@ function evaluateSeatHits(cabinSeatMap, cfg) {
   return hits;
 }
 
-function buildMatches(availabilityMap, cfg, group) {
-  const matches = [];
-  for (const [date, cabinSeatMap] of Object.entries(availabilityMap)) {
-    if (!passesDateFilters(date, group)) {
+function buildMatchesFromFlights(flights, cfg, group) {
+  const byDate = new Map();
+
+  for (const flight of flights) {
+    const date = getDateFromIso(flight?.departsAt);
+    if (!date || !passesDateFilters(date, group)) {
       continue;
     }
 
+    const current = byDate.get(date) || {
+      Economy: 0,
+      PremiumEconomy: 0,
+      Business: 0,
+      First: 0,
+    };
+
+    for (const cabin of CABINS) {
+      const seats = Number(flight?.cabins?.[cabin]?.seats || 0);
+      if (seats > Number(current[cabin] || 0)) {
+        current[cabin] = seats;
+      }
+    }
+
+    byDate.set(date, current);
+  }
+
+  const matches = [];
+  for (const [date, cabinSeatMap] of byDate.entries()) {
     const hits = evaluateSeatHits(cabinSeatMap, cfg);
     if (!hits.length) {
       continue;
@@ -704,6 +705,7 @@ function getDateFromIso(iso) {
 async function fetchFlightDetails(cfg, group) {
   const flights = [];
   const seenIds = new Set();
+  let totalPages = null;
   const activeGroup = group || {
     originAirports: cfg.originAirports,
     destinationAirports: cfg.destinationAirports,
@@ -713,6 +715,11 @@ async function fetchFlightDetails(cfg, group) {
     const url = makeSearchUrl(cfg, activeGroup, page);
     const data = await fetchJson(url, cfg.requestTimeoutMs);
     const pageFlights = Array.isArray(data?.flights) ? data.flights : [];
+    const declaredPages = Number(data?.pagination?.pages ?? data?.pagination?.totalPages ?? 0);
+
+    if (Number.isFinite(declaredPages) && declaredPages > 0) {
+      totalPages = totalPages === null ? declaredPages : Math.min(totalPages, declaredPages);
+    }
 
     if (pageFlights.length === 0) {
       break;
@@ -732,6 +739,10 @@ async function fetchFlightDetails(cfg, group) {
     }
 
     if (newCount === 0) {
+      break;
+    }
+
+    if (totalPages !== null && page >= totalPages) {
       break;
     }
   }
@@ -1097,20 +1108,16 @@ async function runOnce(cfg, statePath) {
       throw new Error("Each watch group requires at least one destination airport or region.");
     }
 
-    const url = makeAvailabilityUrl(cfg, group);
-    const [data, flights] = await Promise.all([
-      fetchJson(url, cfg.requestTimeoutMs),
-      fetchFlightDetails(cfg, group),
-    ]);
-
-    if (!data || typeof data !== "object" || !data.availability) {
-      throw new Error("Unexpected API response: missing availability object");
-    }
-
-    const matches = buildMatches(data.availability, cfg, group);
+    const flights = await fetchFlightDetails(cfg, group);
+    const matches = buildMatchesFromFlights(flights, cfg, group);
     const detailIndex = buildFlightDetailIndex(flights);
+    const flightDateCount = new Set(
+      flights
+        .map((flight) => getDateFromIso(flight?.departsAt))
+        .filter(Boolean)
+    ).size;
 
-    results.push({ group, matches, detailIndex, dateCount: Object.keys(data.availability).length });
+    results.push({ group, matches, detailIndex, dateCount: flightDateCount });
   }
 
   const allMatches = results.flatMap((result) => result.matches);
@@ -1132,7 +1139,7 @@ async function runOnce(cfg, statePath) {
   const matchSummary = results
     .map((result, index) => `${routeLabelForGroup(result.group)}=${result.matches.length}`)
     .join(", ");
-  console.log(`[${new Date().toISOString()}] Retrieved ${totalDates} dates. Matches=${allMatches.length} New=${newSignatures.length}. Groups: ${matchSummary}`);
+  console.log(`[${new Date().toISOString()}] Retrieved ${totalDates} search dates. Matches=${allMatches.length} New=${newSignatures.length}. Groups: ${matchSummary}`);
 
   if (cfg.alertSinks.console && allMatches.length > 0) {
     if (cfg.alertOnChangesOnly) {

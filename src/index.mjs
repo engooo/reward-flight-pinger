@@ -132,7 +132,9 @@ function sanitizeConfig(rawConfig) {
   cfg.weekdays = rootGroup.weekdays;
   cfg.excludeDates = rootGroup.excludeDates;
   cfg.passengers = Number.isInteger(cfg.passengers) ? cfg.passengers : 1;
-  cfg.stops = normalizeStopsForAvailability(Array.isArray(cfg.stops) ? cfg.stops : ["direct"]);
+  const rawStops = Array.isArray(cfg.stops) ? cfg.stops : ["direct"];
+  cfg.searchStops = normalizeStopsForSearch(rawStops);
+  cfg.stops = normalizeStopsForAvailability(rawStops);
   cfg.startMonth = cfg.startMonth === "auto" ? todayMonth() : cfg.startMonth;
   cfg.monthCount = Number.isInteger(cfg.monthCount) ? cfg.monthCount : 4;
   cfg.seatFilters = cfg.seatFilters && typeof cfg.seatFilters === "object" ? cfg.seatFilters : {};
@@ -193,6 +195,66 @@ function normalizeStopsForAvailability(stops) {
   return [];
 }
 
+function normalizeStopsForSearch(stops) {
+  const values = (Array.isArray(stops) ? stops : [])
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean);
+
+  const mapped = [];
+  for (const value of values) {
+    if (value === "direct") {
+      mapped.push("direct");
+      continue;
+    }
+    if (value === "1" || value === "1_stop" || value === "1-stop") {
+      mapped.push("1");
+    }
+  }
+
+  return [...new Set(mapped)];
+}
+
+function buildSearchDateRange(group) {
+  const dates = [];
+
+  if (Array.isArray(group.watchDates)) {
+    for (const date of group.watchDates) {
+      if (isValidIsoDate(date)) {
+        dates.push(date);
+      }
+    }
+  }
+
+  if (Array.isArray(group.watchDateRanges)) {
+    for (const range of group.watchDateRanges) {
+      if (!range || typeof range !== "object") {
+        continue;
+      }
+      if (isValidIsoDate(range.from)) {
+        dates.push(range.from);
+      }
+      if (isValidIsoDate(range.to)) {
+        dates.push(range.to);
+      }
+    }
+  }
+
+  if (dates.length === 0) {
+    return null;
+  }
+
+  dates.sort();
+  return `${dates[0]}I${dates[dates.length - 1]}`;
+}
+
+function buildSearchCabinFilter(cfg) {
+  const cabins = Object.entries(cfg.seatFilters || {})
+    .filter(([cabin, minSeats]) => CABINS.includes(cabin) && Number(minSeats) > 0)
+    .map(([cabin]) => cabin);
+
+  return cabins.length > 0 ? cabins.join(",") : null;
+}
+
 function routeLabelForGroup(group) {
   const origin = group.originAirports.length > 0 ? group.originAirports.join(",") : group.originRegions.join(",") || "*";
   const destination = group.destinationAirports.length > 0 ? group.destinationAirports.join(",") : group.destinationRegions.join(",") || "*";
@@ -220,7 +282,9 @@ function makeAvailabilityUrl(cfg, group) {
 
 function makeSearchUrl(cfg, group, page) {
   const url = new URL(cfg.searchApiBaseUrl);
-  const stops = cfg.stops[0] || "direct";
+  const searchStops = Array.isArray(cfg.searchStops) && cfg.searchStops.length > 0
+    ? cfg.searchStops.join(",")
+    : "direct";
   const origin = Array.isArray(group.originAirports) && group.originAirports.length > 0
     ? group.originAirports.join(",")
     : Array.isArray(group.originRegions) && group.originRegions.length > 0
@@ -234,7 +298,15 @@ function makeSearchUrl(cfg, group, page) {
 
   url.searchParams.set("o", origin);
   url.searchParams.set("d", destination);
-  url.searchParams.set("st", stops);
+  url.searchParams.set("st", searchStops);
+  const dateRange = buildSearchDateRange(group);
+  if (dateRange) {
+    url.searchParams.set("dr", dateRange);
+  }
+  const cabinFilter = buildSearchCabinFilter(cfg);
+  if (cabinFilter) {
+    url.searchParams.set("c", cabinFilter);
+  }
   url.searchParams.set("p", String(cfg.passengers));
   url.searchParams.set("page", String(page));
 

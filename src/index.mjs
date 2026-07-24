@@ -770,8 +770,44 @@ function pickDetailForHit(matchDate, hit, group, detailIndex) {
   return options[0] || null;
 }
 
+function routeLabelFromDetail(detail) {
+  if (!detail || typeof detail !== "object") {
+    return null;
+  }
+
+  const originCode = String(detail.originCode || detail.origin?.code || "").trim();
+  const destinationCode = String(detail.destinationCode || detail.destination?.code || "").trim();
+  if (originCode && destinationCode) {
+    return `${originCode} -> ${destinationCode}`;
+  }
+
+  const originName = String(detail.originName || detail.origin?.name || "").trim();
+  const destinationName = String(detail.destinationName || detail.destination?.name || "").trim();
+  if (originName && destinationName) {
+    return `${originName} -> ${destinationName}`;
+  }
+
+  return null;
+}
+
+function preferredRouteLabel(group, matches, cfg, detailIndex = null) {
+  if (detailIndex && matches.length > 0) {
+    for (const match of matches) {
+      for (const hit of match.hits) {
+        const detail = pickDetailForHit(match.date, hit, group, detailIndex);
+        const routeFromDetail = routeLabelFromDetail(detail);
+        if (routeFromDetail) {
+          return routeFromDetail;
+        }
+      }
+    }
+  }
+
+  return routeLabelForGroup(group);
+}
+
 function buildAlertTextForGroup(group, matches, cfg, detailIndex = null) {
-  const route = routeLabelForGroup(group);
+  const route = preferredRouteLabel(group, matches, cfg, detailIndex);
   const lines = [
     `✈️ Qantas reward seat alert — ${route}`,
     `🧭 Filters: passengers=${cfg.passengers}, stops=${cfg.stops.join(",")}, startMonth=${cfg.startMonth}, months=${cfg.monthCount}`,
@@ -797,7 +833,7 @@ function buildAlertTextForGroup(group, matches, cfg, detailIndex = null) {
 }
 
 function buildTelegramTextForGroup(group, matches, cfg, detailIndex = null) {
-  const route = routeLabelForGroup(group);
+  const route = preferredRouteLabel(group, matches, cfg, detailIndex);
   const lines = [
     `✈️ Qantas reward seat alert`,
     `📍 Route: ${route}`,
@@ -811,7 +847,7 @@ function buildTelegramTextForGroup(group, matches, cfg, detailIndex = null) {
     for (const hit of match.hits) {
       const detail = detailIndex ? pickDetailForHit(match.date, hit, group, detailIndex) : null;
       if (detail) {
-        lines.push(...renderFlightDetailLines(detail, hit));
+        lines.push(...renderFlightDetailLines(match.date, detail, hit));
       } else {
         lines.push(`• ${hit.cabin} | seats ${hit.seats}`);
       }

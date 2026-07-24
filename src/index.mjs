@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 15000;
 const CABINS = ["Economy", "PremiumEconomy", "Business", "First"];
+const SOURCE_MARKER = "[GH-MAIN]";
 
 function parseArgs(argv) {
   const args = {
@@ -892,7 +893,7 @@ function preferredRouteLabel(group, matches, cfg, detailIndex = null) {
 function buildAlertTextForGroup(group, matches, cfg, detailIndex = null) {
   const route = preferredRouteLabel(group, matches, cfg, detailIndex);
   const lines = [
-    `✈️ Qantas reward seat alert — ${route}`,
+    `✈️ ${SOURCE_MARKER} Qantas reward seat alert — ${route}`,
     `🧭 Filters: passengers=${cfg.passengers}, stops=${cfg.stops.join(",")}, startMonth=${cfg.startMonth}, months=${cfg.monthCount}`,
     `✅ Matches: ${matches.length}`,
     "",
@@ -918,7 +919,7 @@ function buildAlertTextForGroup(group, matches, cfg, detailIndex = null) {
 function buildTelegramTextForGroup(group, matches, cfg, detailIndex = null) {
   const route = preferredRouteLabel(group, matches, cfg, detailIndex);
   const lines = [
-    `✈️ Qantas reward seat alert`,
+    `✈️ ${SOURCE_MARKER} Qantas reward seat alert`,
     `📍 Route: ${route}`,
     `✅ Matches: ${matches.length}`,
     "",
